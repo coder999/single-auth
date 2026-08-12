@@ -24,6 +24,17 @@ jobs:
           chmod 600 ~/.ssh/ionos_deploy_key
           ssh-keyscan -p "${{ secrets.IONOS_PORT || 22 }}" "${{ secrets.IONOS_HOST }}" >> ~/.ssh/known_hosts
 
+      # TEMPORARY diagnostic — safe/non-revealing (byte count + hash only,
+      # never the key content itself) — to compare against a locally
+      # computed hash of the same secret. Remove once the SSH load failure
+      # is root-caused.
+      - name: TEMP diagnostic - key file fingerprint
+        run: |
+          wc -c ~/.ssh/ionos_deploy_key
+          wc -l ~/.ssh/ionos_deploy_key
+          sha256sum ~/.ssh/ionos_deploy_key
+          ssh-keygen -y -f ~/.ssh/ionos_deploy_key || echo "ssh-keygen -y FAILED on runner"
+
       - name: Ship dbmate + migrations to IONOS
         run: |
           rsync -az --delete \
