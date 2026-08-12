@@ -90,4 +90,51 @@ final class AdminAuth
             exit('Invalid or expired form token. Go back, reload the page, and try again.');
         }
     }
+
+    public function clientIp(): string
+    {
+        return $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    }
+
+    public function loginThrottled(): bool
+    {
+        $cutoff = (new \DateTimeImmutable('now'))
+            ->modify("-{$this->loginWindowSeconds} seconds")
+            ->format('Y-m-d H:i:s');
+        $st = $this->pdo->prepare('SELECT COUNT(*) AS n FROM login_attempts WHERE ip = ? AND attempted_at > ?');
+        $st->execute([$this->clientIp(), $cutoff]);
+        return (int)$st->fetch()['n'] >= $this->loginMaxAttempts;
+    }
+
+    public function attemptLogin(string $username, string $password): bool
+    {
+        $this->sessionStart();
+        $st = $this->pdo->prepare('SELECT * FROM admin_users WHERE username = ?');
+        $st->execute([$username]);
+        $user = $st->fetch();
+
+        if ($user !== false && password_verify($password, $user['password_hash'])) {
+            $this->pdo->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$this->clientIp()]);
+            session_regenerate_id(true);
+            $_SESSION['admin_id'] = (int)$user['id'];
+            $now = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s');
+            $this->pdo->prepare('UPDATE admin_users SET last_login = ? WHERE id = ?')->execute([$now, $user['id']]);
+            return true;
+        }
+
+        $now = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s');
+        $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')->execute([$this->clientIp(), $now]);
+        return false;
+    }
+
+    public function logout(): void
+    {
+        $this->sessionStart();
+        $_SESSION = [];
+        if (ini_get('session.use_cookies')) {
+            $p = session_get_cookie_params();
+            setcookie(session_name(), '', time() - 42000, $p['path'], $p['domain'], $p['secure'], $p['httponly']);
+        }
+        session_destroy();
+    }
 }

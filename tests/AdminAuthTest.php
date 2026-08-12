@@ -94,4 +94,79 @@ final class AdminAuthTest extends TestCase
 
         $this->assertTrue(true);
     }
+
+    #[RunInSeparateProcess]
+    public function testAttemptLoginSucceedsWithCorrectPassword(): void
+    {
+        $this->pdo->prepare('INSERT INTO admin_users (id, username, password_hash) VALUES (1, ?, ?)')
+            ->execute(['alice', password_hash('secret', PASSWORD_DEFAULT)]);
+
+        $result = $this->auth->attemptLogin('alice', 'secret');
+
+        $this->assertTrue($result);
+        $this->assertSame(1, $_SESSION['admin_id']);
+    }
+
+    #[RunInSeparateProcess]
+    public function testAttemptLoginFailsWithWrongPasswordAndRecordsAttempt(): void
+    {
+        $this->pdo->prepare('INSERT INTO admin_users (id, username, password_hash) VALUES (1, ?, ?)')
+            ->execute(['alice', password_hash('secret', PASSWORD_DEFAULT)]);
+
+        $result = $this->auth->attemptLogin('alice', 'wrong');
+
+        $this->assertFalse($result);
+        $this->assertArrayNotHasKey('admin_id', $_SESSION);
+        $count = (int)$this->pdo->query('SELECT COUNT(*) AS n FROM login_attempts')->fetch()['n'];
+        $this->assertSame(1, $count);
+    }
+
+    #[RunInSeparateProcess]
+    public function testAttemptLoginClearsPriorAttemptsOnSuccess(): void
+    {
+        $this->pdo->prepare('INSERT INTO admin_users (id, username, password_hash) VALUES (1, ?, ?)')
+            ->execute(['alice', password_hash('secret', PASSWORD_DEFAULT)]);
+        $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')
+            ->execute(['127.0.0.1', (new \DateTimeImmutable())->format('Y-m-d H:i:s')]);
+
+        $this->auth->attemptLogin('alice', 'secret');
+
+        $count = (int)$this->pdo->query('SELECT COUNT(*) AS n FROM login_attempts')->fetch()['n'];
+        $this->assertSame(0, $count);
+    }
+
+    #[RunInSeparateProcess]
+    public function testLoginThrottledAfterMaxAttempts(): void
+    {
+        $auth = new AdminAuth($this->pdo, ['cookie_domain' => '.nexus.local', 'login_max_attempts' => 3]);
+        $now = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s');
+        $stmt = $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)');
+        for ($i = 0; $i < 3; $i++) {
+            $stmt->execute(['127.0.0.1', $now]);
+        }
+
+        $this->assertTrue($auth->loginThrottled());
+    }
+
+    #[RunInSeparateProcess]
+    public function testLoginNotThrottledWhenAttemptsAreOld(): void
+    {
+        $auth = new AdminAuth($this->pdo, ['cookie_domain' => '.nexus.local', 'login_max_attempts' => 1, 'login_window_seconds' => 60]);
+        $old = (new \DateTimeImmutable('-2 hours'))->format('Y-m-d H:i:s');
+        $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')
+            ->execute(['127.0.0.1', $old]);
+
+        $this->assertFalse($auth->loginThrottled());
+    }
+
+    #[RunInSeparateProcess]
+    public function testLogoutClearsSession(): void
+    {
+        $_SESSION['admin_id'] = 1;
+        $_SESSION['csrf'] = 'token';
+
+        $this->auth->logout();
+
+        $this->assertSame([], $_SESSION);
+    }
 }
