@@ -1091,13 +1091,15 @@ Before ever running this workflow, on the IONOS side:
 gh secret set IONOS_HOST -R coder999/single-auth
 gh secret set IONOS_USER -R coder999/single-auth
 gh secret set IONOS_SSH_KEY -R coder999/single-auth < /path/to/deploy_key
-gh secret set IONOS_TARGET -R coder999/single-auth   # a NEW sibling path, e.g. "single-auth", distinct from marktuttlemd's target
+gh secret set IONOS_TARGET -R coder999/single-auth   # NEW sibling path, distinct from marktuttlemd's target — see note below
 gh secret set SINGLE_AUTH_DB_HOST -R coder999/single-auth
 gh secret set SINGLE_AUTH_DB_PORT -R coder999/single-auth
 gh secret set SINGLE_AUTH_DB_NAME -R coder999/single-auth
 gh secret set SINGLE_AUTH_DB_USER -R coder999/single-auth
 gh secret set SINGLE_AUTH_DB_PASS -R coder999/single-auth
 ```
+
+The IONOS shared-hosting account root is `/kunden/homepages/26/d193370434/htdocs` — every project (`marktuttlemd`, `mdproductivity`, etc.) is a sibling directory directly under that root, each with its own `htdocs/` inside (e.g. `marktuttlemd`'s webroot is `/kunden/homepages/26/d193370434/htdocs/marktuttlemd/htdocs`), matching this workflow's sibling-directory assumption. `single-auth` has no webroot of its own — set `IONOS_TARGET` to the absolute path `/kunden/homepages/26/d193370434/htdocs/single-auth` (a new sibling directory that will hold only `db/migrations/` and `bin/dbmate`, nothing web-served). Using the full absolute path here — rather than a bare relative name like `single-auth` — avoids depending on whether the SSH migration step's shell lands in the same working directory the SFTP/rsync step does; it's unambiguous either way.
 
 3. Trigger the workflow manually (`gh workflow run migrate.yml -R
    coder999/single-auth`, or via the Actions tab) and confirm it succeeds.
