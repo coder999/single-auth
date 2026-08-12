@@ -66,4 +66,28 @@ final class AdminAuth
         }
         return $user;
     }
+
+    public function csrfToken(): string
+    {
+        $this->sessionStart();
+        if (empty($_SESSION['csrf'])) {
+            $_SESSION['csrf'] = bin2hex(random_bytes(32));
+        }
+        return $_SESSION['csrf'];
+    }
+
+    public function csrfField(): string
+    {
+        return '<input type="hidden" name="csrf" value="' . htmlspecialchars($this->csrfToken()) . '">';
+    }
+
+    public function csrfCheck(): void
+    {
+        $this->sessionStart();
+        $sent = $_POST['csrf'] ?? '';
+        if (empty($_SESSION['csrf']) || !hash_equals($_SESSION['csrf'], (string)$sent)) {
+            http_response_code(400);
+            exit('Invalid or expired form token. Go back, reload the page, and try again.');
+        }
+    }
 }

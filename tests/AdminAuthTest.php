@@ -64,4 +64,34 @@ final class AdminAuthTest extends TestCase
 
         $this->assertNull($this->auth->currentAdmin());
     }
+
+    #[RunInSeparateProcess]
+    public function testCsrfTokenIsGeneratedAndStable(): void
+    {
+        $first = $this->auth->csrfToken();
+        $second = $this->auth->csrfToken();
+
+        $this->assertSame(64, strlen($first)); // bin2hex(random_bytes(32))
+        $this->assertSame($first, $second);
+    }
+
+    #[RunInSeparateProcess]
+    public function testCsrfFieldEmbedsTheToken(): void
+    {
+        $field = $this->auth->csrfField();
+
+        $this->assertStringContainsString($this->auth->csrfToken(), $field);
+        $this->assertStringContainsString('name="csrf"', $field);
+    }
+
+    #[RunInSeparateProcess]
+    public function testCsrfCheckPassesWithMatchingToken(): void
+    {
+        $token = $this->auth->csrfToken();
+        $_POST['csrf'] = $token;
+
+        $this->auth->csrfCheck(); // no exception/exit means success
+
+        $this->assertTrue(true);
+    }
 }
