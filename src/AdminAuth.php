@@ -53,8 +53,12 @@ final class AdminAuth
         }
         $st = $this->pdo->prepare('SELECT id, username, last_login FROM admin_users WHERE id = ?');
         $st->execute([$_SESSION['admin_id']]);
-        $user = $st->fetch();
-        return $user === false ? null : $user;
+        $user = $st->fetch(PDO::FETCH_ASSOC);
+        if ($user === false) {
+            return null;
+        }
+        $user['id'] = (int)$user['id'];
+        return $user;
     }
 
     public function requireAdmin(string $loginUrl = 'login.php'): array
@@ -98,12 +102,12 @@ final class AdminAuth
 
     public function loginThrottled(): bool
     {
-        $cutoff = (new \DateTimeImmutable('now'))
+        $cutoff = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))
             ->modify("-{$this->loginWindowSeconds} seconds")
             ->format('Y-m-d H:i:s');
         $st = $this->pdo->prepare('SELECT COUNT(*) AS n FROM login_attempts WHERE ip = ? AND attempted_at > ?');
         $st->execute([$this->clientIp(), $cutoff]);
-        return (int)$st->fetch()['n'] >= $this->loginMaxAttempts;
+        return (int)$st->fetch(PDO::FETCH_ASSOC)['n'] >= $this->loginMaxAttempts;
     }
 
     public function attemptLogin(string $username, string $password): bool
@@ -111,18 +115,18 @@ final class AdminAuth
         $this->sessionStart();
         $st = $this->pdo->prepare('SELECT * FROM admin_users WHERE username = ?');
         $st->execute([$username]);
-        $user = $st->fetch();
+        $user = $st->fetch(PDO::FETCH_ASSOC);
 
         if ($user !== false && password_verify($password, $user['password_hash'])) {
             $this->pdo->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$this->clientIp()]);
             session_regenerate_id(true);
             $_SESSION['admin_id'] = (int)$user['id'];
-            $now = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s');
+            $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
             $this->pdo->prepare('UPDATE admin_users SET last_login = ? WHERE id = ?')->execute([$now, $user['id']]);
             return true;
         }
 
-        $now = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s');
+        $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
         $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')->execute([$this->clientIp(), $now]);
         return false;
     }

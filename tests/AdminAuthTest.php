@@ -55,6 +55,8 @@ final class AdminAuthTest extends TestCase
 
         $this->assertNotNull($user);
         $this->assertSame('alice', $user['username']);
+        $this->assertIsInt($user['id']);
+        $this->assertSame(1, $user['id']);
     }
 
     #[RunInSeparateProcess]
