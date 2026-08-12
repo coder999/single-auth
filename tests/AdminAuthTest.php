@@ -33,6 +33,7 @@ final class AdminAuthTest extends TestCase
         )');
 
         $this->auth = new AdminAuth($this->pdo, ['cookie_domain' => '.nexus.local']);
+        $this->auth->sessionStart();
         $_SESSION = [];
         $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
     }

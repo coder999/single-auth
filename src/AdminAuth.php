@@ -26,7 +26,6 @@ final class AdminAuth
         $this->cookieSecure = $options['cookie_secure'] ?? true;
         $this->loginMaxAttempts = $options['login_max_attempts'] ?? 8;
         $this->loginWindowSeconds = $options['login_window_seconds'] ?? 900;
-        $this->sessionStart();
     }
 
     public function sessionStart(): void
