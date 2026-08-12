@@ -91,12 +91,16 @@ cookie purposes — this makes cross-subdomain cookie sharing straightforward
 - Cookie name stays `mtmd_admin` — continuity with marktuttlemd's existing
   sessions.
 - Cookie **domain is environment-aware**, not hardcoded: each consuming
-  app's wrapper computes it using the same local/production detection
-  convention already used elsewhere in these projects (presence of a
-  `local.marker` file, not a Host-header check) —`.marktuttlemd.com` in
-  production, `.nexus.local` (or `.odroid.local`) locally. This means SSO
-  works in local dev too, using the existing convention, not just
-  production.
+  app's wrapper computes it via a `local.marker`-file check (present in the
+  git checkout, excluded from the deploy rsync) — same convention already
+  used by `mdproductivity`, `dash`, and `diaslab` — giving
+  `.marktuttlemd.com` in production and `.nexus.local`/`.odroid.local`
+  locally. This means SSO works in local dev too, not just production.
+  Note: marktuttlemd's *existing* `admin/config.php` actually uses a
+  Host-header check today (`str_ends_with($host, '.odroid.local')`, which
+  doesn't even recognize `.nexus.local`) rather than `local.marker` — that
+  file is left as-is; the new single-auth wrapper does its own independent
+  `local.marker` check rather than reusing or fixing that existing logic.
 - `secure` and `httponly` stay `true`. `SameSite=Lax` stays — cross-
   subdomain sharing needs neither CORS nor `SameSite=None` since
   `mdproductivity.marktuttlemd.com` and `marktuttlemd.com` share a
