@@ -1,0 +1,23 @@
+{
+    "name": "coder999/single-auth",
+    "description": "Shared PHP identity/session library for marktuttlemd.com and its subdomain apps",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.1",
+        "ext-pdo": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Mtmd\\SingleAuth\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Mtmd\\SingleAuth\\Tests\\": "tests/"
+        }
+    }
+}
