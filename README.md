@@ -27,12 +27,41 @@ see the design doc's "Authn vs authz" section for why.
 $pdo = new PDO($identityDsn, $identityUser, $identityPass, [...]);
 $auth = new \Mtmd\SingleAuth\AdminAuth($pdo, [
     'cookie_domain' => $isLocal ? '.nexus.local' : '.marktuttlemd.com',
+    'cookie_secure' => !$isLocal,
 ]);
 
 session_set_save_handler(new \Mtmd\SingleAuth\DbSessionHandler($pdo), true);
 
 $user = $auth->requireAdmin(); // redirects to login.php if not logged in
 ```
+
+On the login form, `attemptLogin()` does **not** consult `loginThrottled()`
+itself — enforcing the lockout is the calling app's responsibility. Check
+throttling before attempting the login:
+
+```php
+if ($auth->loginThrottled()) {
+    $error = 'Too many failed attempts. Please wait 15 minutes and try again.';
+} elseif ($auth->attemptLogin($username, $password)) {
+    // success
+} else {
+    $error = 'Incorrect username or password.';
+}
+```
+
+`csrfCheck()` terminates the request itself (calls `exit`) when the token
+is missing or invalid, so callers should not expect a return value to
+check — just call it and continue if it returns.
+
+### `AdminAuth` constructor options
+
+| Option                 | Default        | Notes                                                            |
+|-------------------------|----------------|-------------------------------------------------------------------|
+| `cookie_name`           | `'mtmd_admin'` | Session cookie / `session_name()`.                                |
+| `cookie_domain`         | `''`           | Host-only by default; set to `.marktuttlemd.com` / `.nexus.local` for cross-subdomain sharing. |
+| `cookie_secure`         | `true`         | Requires HTTPS to persist the cookie — set to `false` (or conditionally, as above) for plain-HTTP local dev. |
+| `login_max_attempts`    | `8`            | Failed attempts allowed per IP within `login_window_seconds` before `loginThrottled()` returns `true`. |
+| `login_window_seconds`  | `900`          | Rolling window (seconds) that `login_max_attempts` is counted over. |
 
 ## Database Migrations (dbmate)
 
