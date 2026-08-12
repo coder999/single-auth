@@ -1001,11 +1001,16 @@ git commit -m "Add README and CLAUDE.md"
 **Interfaces:**
 - Consumes: `secrets.IONOS_HOST`, `secrets.IONOS_USER`,
   `secrets.IONOS_SSH_KEY`, `secrets.IONOS_PORT` (optional),
-  `secrets.IONOS_TARGET`, `secrets.SINGLE_AUTH_DB_HOST`,
-  `secrets.SINGLE_AUTH_DB_PORT`, `secrets.SINGLE_AUTH_DB_NAME`,
-  `secrets.SINGLE_AUTH_DB_USER`, `secrets.SINGLE_AUTH_DB_PASS` — all set
-  manually in this repo's GitHub settings before first use (Step 3 below;
-  **do not** run this workflow until they're set).
+  `secrets.IONOS_TARGET`, `secrets.DB_HOST`, `secrets.DB_PORT`,
+  `secrets.DB_NAME`, `secrets.DB_USER`, `secrets.DB_PASS` — bare `DB_*`
+  names, matching the convention every other repo uses for its own
+  database, since this repo only ever touches one database
+  (`single_auth`) and there's no second `DB_*` set to collide with (unlike
+  `marktuttlemd`/`mdproductivity`, which each already have their own
+  `DB_*` secrets for their own app database and so need the identity DB's
+  credentials under a different name, `SINGLE_AUTH_DB_*`, to avoid a
+  collision). All set manually in this repo's GitHub settings before first
+  use (Step 3 below; **do not** run this workflow until they're set).
 
 This workflow ships only `db/migrations/` and a `dbmate` binary to a
 sibling directory on the IONOS account (this repo has no webroot — nothing
@@ -1052,11 +1057,11 @@ jobs:
 
       - name: Run migrations
         env:
-          DB_HOST: ${{ secrets.SINGLE_AUTH_DB_HOST }}
-          DB_PORT: ${{ secrets.SINGLE_AUTH_DB_PORT }}
-          DB_NAME: ${{ secrets.SINGLE_AUTH_DB_NAME }}
-          DB_USER: ${{ secrets.SINGLE_AUTH_DB_USER }}
-          DB_PASS: ${{ secrets.SINGLE_AUTH_DB_PASS }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASS: ${{ secrets.DB_PASS }}
           IONOS_TARGET: ${{ secrets.IONOS_TARGET }}
         run: |
           set -euo pipefail
@@ -1092,12 +1097,19 @@ gh secret set IONOS_HOST -R coder999/single-auth
 gh secret set IONOS_USER -R coder999/single-auth
 gh secret set IONOS_SSH_KEY -R coder999/single-auth < /path/to/deploy_key
 gh secret set IONOS_TARGET -R coder999/single-auth   # NEW sibling path, distinct from marktuttlemd's target — see note below
-gh secret set SINGLE_AUTH_DB_HOST -R coder999/single-auth
-gh secret set SINGLE_AUTH_DB_PORT -R coder999/single-auth
-gh secret set SINGLE_AUTH_DB_NAME -R coder999/single-auth
-gh secret set SINGLE_AUTH_DB_USER -R coder999/single-auth
-gh secret set SINGLE_AUTH_DB_PASS -R coder999/single-auth
+gh secret set DB_HOST -R coder999/single-auth
+gh secret set DB_PORT -R coder999/single-auth
+gh secret set DB_NAME -R coder999/single-auth
+gh secret set DB_USER -R coder999/single-auth
+gh secret set DB_PASS -R coder999/single-auth
 ```
+
+These are named `DB_*` (not `SINGLE_AUTH_DB_*`) here — this repo only
+ever touches its own one database, so the bare convention every other repo
+uses applies unchanged. `marktuttlemd` and `mdproductivity` each need
+these same credential values under `SINGLE_AUTH_DB_*` instead, since they
+already have their own `DB_*` secrets for their own app database and a
+second database needs a different name to avoid colliding.
 
 The IONOS shared-hosting account root is `/kunden/homepages/26/d193370434/htdocs` — every project (`marktuttlemd`, `mdproductivity`, etc.) is a sibling directory directly under that root, each with its own `htdocs/` inside (e.g. `marktuttlemd`'s webroot is `/kunden/homepages/26/d193370434/htdocs/marktuttlemd/htdocs`), matching this workflow's sibling-directory assumption. `single-auth` has no webroot of its own — set `IONOS_TARGET` to the absolute path `/kunden/homepages/26/d193370434/htdocs/single-auth` (a new sibling directory that will hold only `db/migrations/` and `bin/dbmate`, nothing web-served). Using the full absolute path here — rather than a bare relative name like `single-auth` — avoids depending on whether the SSH migration step's shell lands in the same working directory the SFTP/rsync step does; it's unambiguous either way.
 
