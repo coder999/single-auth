@@ -9,13 +9,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download dbmate
+      - name: Build dbmate (CGO_ENABLED=0)
         run: |
           set -euo pipefail
+          # Prebuilt dbmate releases are cgo-enabled (for optional SQLite
+          # support, unused here) and reserve enough virtual memory at
+          # process startup to exceed this IONOS account's hard 768MB
+          # `ulimit -v` ceiling — the binary panics with "pthread_create
+          # failed: Resource temporarily unavailable" before dbmate's own
+          # logic ever runs (confirmed directly over SSH; same fix already
+          # in place for the `dash` project — see its README for the full
+          # writeup). A CGO_ENABLED=0 build has a small enough footprint to
+          # start cleanly under that limit; MySQL support is pure Go either
+          # way, only the (unused) SQLite driver needs cgo.
           mkdir -p "$GITHUB_WORKSPACE/bin"
-          curl -fsSL -o "$GITHUB_WORKSPACE/bin/dbmate" \
-            https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-amd64
+          git clone --depth 1 https://github.com/amacneil/dbmate.git /tmp/dbmate-src
+          (cd /tmp/dbmate-src && CGO_ENABLED=0 go build -o "$GITHUB_WORKSPACE/bin/dbmate" .)
           chmod +x "$GITHUB_WORKSPACE/bin/dbmate"
+          "$GITHUB_WORKSPACE/bin/dbmate" --version
 
       - name: Set up SSH
         run: |
