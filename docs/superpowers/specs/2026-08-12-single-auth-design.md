@@ -109,10 +109,22 @@ cookie purposes — this makes cross-subdomain cookie sharing straightforward
 ## Authn vs authz
 
 Authentication (who is this?) is centralized in this library — it's the
-only thing with an `identity_auth` DB credential and it's the only code
-that ever touches `admin_users`/`admin_sessions` directly.
+only thing with an `identity_auth` DB credential and it's meant to be the
+only code that ever touches `admin_users`/`admin_sessions` directly.
 `currentAdmin()` returns the identity (`{id, username}`), not just a
 boolean, specifically so that authorization stays out of this library:
+
+**This is a design intent, not something enforced anywhere — verify it on
+every consuming app, don't assume it.** `marktuttlemd`'s integration
+initially violated it: `settings.php` (password change, new-admin
+creation, admin listing) predated this migration and kept reading/writing
+`admin_users` through the app's own database connection instead of
+`identity_pdo()`, discovered only by a final whole-branch review after
+all of that project's individually-reviewed tasks had shipped — none of
+which touched `settings.php`, so none of them could catch it. Concretely:
+grep any consuming app for `admin_users`/`admin_sessions`/`login_attempts`
+outside of `single-auth`'s own code before considering an integration
+done, not just the files the integration plan intended to touch.
 
 Authorization (what can this identity do *here*?) is deliberately left to
 each consuming app's own database, keyed by the `admin_id` this library
