@@ -1,0 +1,52 @@
+name: Migrate single_auth (production)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dbmate
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          curl -fsSL -o "$GITHUB_WORKSPACE/bin/dbmate" \
+            https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-amd64
+          chmod +x "$GITHUB_WORKSPACE/bin/dbmate"
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.IONOS_SSH_KEY }}" > ~/.ssh/ionos_deploy_key
+          chmod 600 ~/.ssh/ionos_deploy_key
+          ssh-keyscan -p "${{ secrets.IONOS_PORT || 22 }}" "${{ secrets.IONOS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Ship dbmate + migrations to IONOS
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' --exclude '.github/' --exclude 'src/' \
+            --exclude 'tests/' --exclude 'vendor/' --exclude 'composer.*' \
+            --exclude 'README.md' --exclude 'phpunit.xml' \
+            -e "ssh -i ~/.ssh/ionos_deploy_key -o IdentitiesOnly=yes -p ${{ secrets.IONOS_PORT || 22 }}" \
+            ./ "${{ secrets.IONOS_USER }}@${{ secrets.IONOS_HOST }}:${{ secrets.IONOS_TARGET }}/"
+
+      - name: Run migrations
+        env:
+          DB_HOST: ${{ secrets.SINGLE_AUTH_DB_HOST }}
+          DB_PORT: ${{ secrets.SINGLE_AUTH_DB_PORT }}
+          DB_NAME: ${{ secrets.SINGLE_AUTH_DB_NAME }}
+          DB_USER: ${{ secrets.SINGLE_AUTH_DB_USER }}
+          DB_PASS: ${{ secrets.SINGLE_AUTH_DB_PASS }}
+          IONOS_TARGET: ${{ secrets.IONOS_TARGET }}
+        run: |
+          set -euo pipefail
+          DB_USER_ENC=$(jq -rn --arg v "$DB_USER" '$v|@uri')
+          DB_PASS_ENC=$(jq -rn --arg v "$DB_PASS" '$v|@uri')
+          DATABASE_URL="mysql://${DB_USER_ENC}:${DB_PASS_ENC}@${DB_HOST}:${DB_PORT:-3306}/${DB_NAME}"
+          ssh -i ~/.ssh/ionos_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes \
+            -p "${{ secrets.IONOS_PORT || 22 }}" \
+            "${{ secrets.IONOS_USER }}@${{ secrets.IONOS_HOST }}" \
+            "DATABASE_URL='$DATABASE_URL' '$IONOS_TARGET/bin/dbmate' --migrations-dir '$IONOS_TARGET/db/migrations' up"
