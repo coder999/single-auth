@@ -56,6 +56,7 @@ about not providing.
 | Each consumer's `admin_auth()` wrapper fn | `auth()` |
 | Each consumer's `current_admin()` wrapper fn | `current_user()` |
 | Each consumer's `require_admin()` wrapper fn | `require_login()` |
+| `$_SESSION['admin_id']` (internal only) | `$_SESSION['user_id']` |
 
 Unchanged (already generic, nothing admin-specific about them):
 `csrfToken()`, `csrfField()`, `csrfCheck()`, `attemptLogin()`, `logout()`,
@@ -63,6 +64,11 @@ Unchanged (already generic, nothing admin-specific about them):
 consumer's PDO-factory wrapper function), `login_attempts` table,
 `identity_auth` DB user, `single_auth` database, `IDENTITY_DB_*` /
 `IDENTITY_COOKIE_*` constants (already identity-neutral).
+
+`$_SESSION['admin_id']` is internal to `Auth`/`currentUser()`/
+`attemptLogin()` — confirmed (grep, both consumer repos) that no consumer
+reads or writes it directly, only through the class's own methods, so
+renaming it has zero external surface.
 
 The returned identity array's own keys (`id`, `username`) don't change —
 only the method name that returns it does. Anywhere existing docs
