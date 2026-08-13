@@ -25,7 +25,7 @@ final class DbSessionHandler implements SessionHandlerInterface
 
     public function read(string $id): string|false
     {
-        $st = $this->pdo->prepare('SELECT data FROM admin_sessions WHERE id = ?');
+        $st = $this->pdo->prepare('SELECT data FROM sessions WHERE id = ?');
         $st->execute([$id]);
         $row = $st->fetch(PDO::FETCH_ASSOC);
         return $row === false ? '' : $row['data'];
@@ -35,21 +35,21 @@ final class DbSessionHandler implements SessionHandlerInterface
     {
         $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
 
-        $exists = $this->pdo->prepare('SELECT 1 FROM admin_sessions WHERE id = ?');
+        $exists = $this->pdo->prepare('SELECT 1 FROM sessions WHERE id = ?');
         $exists->execute([$id]);
 
         if ($exists->fetch(PDO::FETCH_ASSOC) !== false) {
-            $st = $this->pdo->prepare('UPDATE admin_sessions SET data = ?, last_activity = ? WHERE id = ?');
+            $st = $this->pdo->prepare('UPDATE sessions SET data = ?, last_activity = ? WHERE id = ?');
             return $st->execute([$data, $now, $id]);
         }
 
-        $st = $this->pdo->prepare('INSERT INTO admin_sessions (id, data, last_activity) VALUES (?, ?, ?)');
+        $st = $this->pdo->prepare('INSERT INTO sessions (id, data, last_activity) VALUES (?, ?, ?)');
         return $st->execute([$id, $data, $now]);
     }
 
     public function destroy(string $id): bool
     {
-        $st = $this->pdo->prepare('DELETE FROM admin_sessions WHERE id = ?');
+        $st = $this->pdo->prepare('DELETE FROM sessions WHERE id = ?');
         return $st->execute([$id]);
     }
 
@@ -58,7 +58,7 @@ final class DbSessionHandler implements SessionHandlerInterface
         $cutoff = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))
             ->modify("-{$max_lifetime} seconds")
             ->format('Y-m-d H:i:s');
-        $st = $this->pdo->prepare('DELETE FROM admin_sessions WHERE last_activity < ?');
+        $st = $this->pdo->prepare('DELETE FROM sessions WHERE last_activity < ?');
         $st->execute([$cutoff]);
         return $st->rowCount();
     }
