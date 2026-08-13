@@ -57,6 +57,7 @@ about not providing.
 | Each consumer's `current_admin()` wrapper fn | `current_user()` |
 | Each consumer's `require_admin()` wrapper fn | `require_login()` |
 | `$_SESSION['admin_id']` (internal only) | `$_SESSION['user_id']` |
+| marktuttlemd's `admin_session_start()` wrapper fn | `start_session()` |
 
 Unchanged (already generic, nothing admin-specific about them):
 `csrfToken()`, `csrfField()`, `csrfCheck()`, `attemptLogin()`, `logout()`,
@@ -123,7 +124,12 @@ describe authorization as "keyed by the `admin_id` this library returns"
 - `admin/lib/auth.php`: update the `Mtmd\SingleAuth\AdminAuth` import to
   `Auth`, rename the `admin_auth()`/`current_admin()`/`require_admin()`
   wrapper functions to `auth()`/`current_user()`/`require_login()`,
-  update their bodies to call `currentUser()`/`requireLogin()`.
+  update their bodies to call `currentUser()`/`requireLogin()`. This file
+  also has a wrapper `mdproductivity` doesn't: `admin_session_start()`
+  (calls the unchanged `sessionStart()`) — rename to `start_session()`
+  (not `session_start()`, which collides with PHP's own built-in
+  function of that exact name). It has two direct callers outside
+  `auth.php` itself: `admin/login.php:4` and `admin/lib/ui.php:52,58`.
 - `admin/setup.php`: delete the dead `CREATE TABLE IF NOT EXISTS
   admin_users (...)` block (leftover from before the table moved into
   `single_auth` — the line directly above it already says so in a
@@ -133,19 +139,35 @@ describe authorization as "keyed by the `admin_id` this library returns"
 - `admin/settings.php`: update all four direct `admin_users` references
   (`SELECT`/`UPDATE`/`INSERT`/the admin-listing query) to `users`, and
   rename the `$admins` display variable to `$users`.
-- Every other file that calls the wrapper functions (`login.php`,
-  `content.php`, `items.php`, etc.) needs no changes beyond the function
-  names already covered by the `auth.php` wrapper rename — this was true
-  in the original design too ("thin wrapper... zero changes to
-  `login.php`, `content.php`...") and still holds, since callers use the
-  wrapper's exported names, not the library's directly.
+- Every other file that calls the wrapper functions needs its call sites
+  updated to the new names (unlike the original integration, where
+  wrapper names stayed identical to what callers already used — this
+  rename changes the names themselves, so every call site changes too,
+  even though the *behavior* at each site doesn't). Confirmed full list
+  via grep, each just a function-name swap, no logic change:
+  - `admin/login.php:4` — `admin_session_start();` → `start_session();`
+  - `admin/login.php:5` — `if (current_admin() !== null) {` → `if (current_user() !== null) {`
+  - `admin/lib/ui.php:12` — `$user = current_admin();` → `$user = current_user();`
+  - `admin/lib/ui.php:52,58` — `admin_session_start();` → `start_session();` (two call sites)
+  - `admin/content.php:4` — `require_admin();` → `require_login();`
+  - `admin/items.php:4` — `require_admin();` → `require_login();`
+  - `admin/index.php:5` — `$user = require_admin();` → `$user = require_login();`
+  - `admin/settings.php:5` — `$user = require_admin();` → `$user = require_login();`
 
 ## `mdproductivity` changes
 
 - Bump `composer.json`'s `coder999/single-auth` constraint to `^0.2.0`.
 - `htdocs/lib/auth.php`: same treatment as marktuttlemd's — import,
   wrapper function renames, body updates. No direct SQL here (this app
-  never queried `admin_users` itself), so nothing else to change.
+  never queried `admin_users` itself) and no `admin_session_start()`
+  equivalent (this app doesn't have that wrapper), so nothing else in
+  this file.
+- Call sites needing the function-name swap (confirmed via grep, same
+  "name changes, behavior doesn't" pattern as marktuttlemd's list above):
+  - `htdocs/index.php:4` — `require_admin();` → `require_login();`
+  - `htdocs/import.php:6` — `require_admin();` → `require_login();`
+  - `htdocs/api/summary.php:4` — `require_admin();` → `require_login();`
+  - `htdocs/login.php:5` — `if (current_admin() !== null) {` → `if (current_user() !== null) {`
 
 ## Cutover sequencing
 
