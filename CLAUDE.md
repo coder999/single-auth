@@ -28,7 +28,7 @@ tables, since a mistake affects every consumer at once, not just this repo.
 
 ## No SQL dialect-specific syntax in `src/`
 
-`AdminAuth` and `DbSessionHandler` deliberately avoid `NOW()`, `INTERVAL`,
+`Auth` and `DbSessionHandler` deliberately avoid `NOW()`, `INTERVAL`,
 and `ON DUPLICATE KEY UPDATE` — "current time" is computed in PHP and
 passed as a bound parameter, and writes use select-then-insert-or-update.
 This is what lets the whole test suite run against an in-memory SQLite PDO
