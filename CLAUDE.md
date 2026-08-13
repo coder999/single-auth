@@ -13,10 +13,11 @@ tables, since a mistake affects every consumer at once, not just this repo.
 2. Generate a migration file first:
    `dbmate --migrations-dir db/migrations new <descriptive_name>`
 3. Write the DDL in `-- migrate:up` (and `-- migrate:down` to reverse it).
-   Keep `admin_users`/`login_attempts` column-compatible with what
-   `marktuttlemd`'s original schema had, unless a migration is
-   deliberately evolving them — every consuming app's `AdminAuth` usage
-   assumes these shapes.
+   Keep `users`/`login_attempts` column-compatible with what they already
+   have, unless a migration is deliberately evolving them — every
+   consuming app's `Auth` usage assumes these shapes. (`users` was renamed
+   from `admin_users` in the `2026-08-13-auth-rename` migration — see
+   `docs/superpowers/specs/2026-08-13-auth-rename.md`.)
 4. Apply locally to verify:
    `DATABASE_URL="mysql://root:ChangeThisRootPassword@127.0.0.1:3306/single_auth" dbmate --migrations-dir db/migrations up`
 5. Confirm the `db/schema.sql` diff matches intent; stage both files.
