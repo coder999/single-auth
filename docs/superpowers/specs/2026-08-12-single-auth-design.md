@@ -127,7 +127,7 @@ outside of `single-auth`'s own code before considering an integration
 done, not just the files the integration plan intended to touch.
 
 Authorization (what can this identity do *here*?) is deliberately left to
-each consuming app's own database, keyed by the `user_id` this library
+each consuming app's own database, keyed by the `id` this library
 returns — e.g. a future `productivity_admins` table living entirely inside
 `mdproductivity`'s own database, unrelated to and unknown by `single-auth`.
 Today there is one admin across every app, so no app needs to build this

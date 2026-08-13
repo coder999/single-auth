@@ -45,6 +45,15 @@ final class AuthTest extends TestCase
     }
 
     #[RunInSeparateProcess]
+    public function testDefaultCookieNameIsIdentitySession(): void
+    {
+        $auth = new Auth($this->pdo, ['cookie_domain' => '.nexus.local']);
+        $auth->sessionStart();
+
+        $this->assertSame('identity_session', session_name());
+    }
+
+    #[RunInSeparateProcess]
     public function testCurrentUserReturnsUserWhenSessionHasUserId(): void
     {
         $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (1, ?, ?)')

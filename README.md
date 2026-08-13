@@ -66,3 +66,11 @@ check — just call it and continue if it returns.
 ## Database Migrations (dbmate)
 
 Same convention as `marktuttlemd`/`mdproductivity`. See `CLAUDE.md`.
+
+**Migration `20260813020513_rename_admin_tables` is not safe to run in
+isolation** — running it via `.github/workflows/migrate.yml` outside the
+coordinated 3-repo cutover documented in
+`docs/superpowers/specs/2026-08-13-auth-rename.md` breaks both consuming
+sites (`marktuttlemd`, `mdproductivity`) immediately, since their
+currently-deployed code queries the old `admin_users`/`admin_sessions`
+table names until they're redeployed on `single-auth` `v0.2.0`.
