@@ -38,8 +38,9 @@ instead of needing a live MySQL for every test run. Keep any new code in
 ## Consumers
 
 `marktuttlemd` and `mdproductivity` both require this package via a
-Composer VCS repository entry pointing at this (private) GitHub repo, and
-each holds its own `identity_auth` database credentials (scoped to
-`single_auth.*` only) alongside its own app-database credentials. See
+Composer VCS repository entry pointing at this (public) GitHub repo — no
+Composer auth token needed to fetch it — and each holds its own
+`identity_auth` database credentials (scoped to `single_auth.*` only)
+alongside its own app-database credentials. See
 `docs/superpowers/specs/2026-08-12-single-auth-design.md` for the full
 authn/authz split rationale.
