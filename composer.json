@@ -1,6 +1,6 @@
 {
     "name": "coder999/single-auth",
-    "description": "Shared PHP identity/session library for marktuttlemd.com and its subdomain apps",
+    "description": "Shared PHP identity/session library for a primary domain and its subdomain apps",
     "type": "library",
     "license": "proprietary",
     "require": {
