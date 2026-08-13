@@ -11,7 +11,7 @@ projects were built.
 
 ## What this is
 
-- `Mtmd\SingleAuth\AdminAuth` — session bootstrap, identity lookup, CSRF
+- `Mtmd\SingleAuth\Auth` — session bootstrap, identity lookup, CSRF
   helpers, login/logout, login throttling.
 - `Mtmd\SingleAuth\DbSessionHandler` — a `SessionHandlerInterface`
   implementation backing PHP sessions with a database table instead of
@@ -25,14 +25,14 @@ see the design doc's "Authn vs authz" section for why.
 
 ```php
 $pdo = new PDO($identityDsn, $identityUser, $identityPass, [...]);
-$auth = new \Mtmd\SingleAuth\AdminAuth($pdo, [
+$auth = new \Mtmd\SingleAuth\Auth($pdo, [
     'cookie_domain' => $isLocal ? '.nexus.local' : '.marktuttlemd.com',
     'cookie_secure' => !$isLocal,
 ]);
 
 session_set_save_handler(new \Mtmd\SingleAuth\DbSessionHandler($pdo), true);
 
-$user = $auth->requireAdmin(); // redirects to login.php if not logged in
+$user = $auth->requireLogin(); // redirects to login.php if not logged in
 ```
 
 On the login form, `attemptLogin()` does **not** consult `loginThrottled()`
@@ -53,11 +53,11 @@ if ($auth->loginThrottled()) {
 is missing or invalid, so callers should not expect a return value to
 check — just call it and continue if it returns.
 
-### `AdminAuth` constructor options
+### `Auth` constructor options
 
 | Option                 | Default        | Notes                                                            |
 |-------------------------|----------------|-------------------------------------------------------------------|
-| `cookie_name`           | `'mtmd_admin'` | Session cookie / `session_name()`.                                |
+| `cookie_name`           | `'identity_session'` | Session cookie / `session_name()`.                                |
 | `cookie_domain`         | `''`           | Host-only by default; set to `.marktuttlemd.com` / `.nexus.local` for cross-subdomain sharing. |
 | `cookie_secure`         | `true`         | Requires HTTPS to persist the cookie — set to `false` (or conditionally, as above) for plain-HTTP local dev. |
 | `login_max_attempts`    | `8`            | Failed attempts allowed per IP within `login_window_seconds` before `loginThrottled()` returns `true`. |
@@ -66,3 +66,11 @@ check — just call it and continue if it returns.
 ## Database Migrations (dbmate)
 
 Same convention as `marktuttlemd`/`mdproductivity`. See `CLAUDE.md`.
+
+**Migration `20260813020513_rename_admin_tables` is not safe to run in
+isolation** — running it via `.github/workflows/migrate.yml` outside the
+coordinated 3-repo cutover documented in
+`docs/superpowers/specs/2026-08-13-auth-rename.md` breaks both consuming
+sites (`marktuttlemd`, `mdproductivity`) immediately, since their
+currently-deployed code queries the old `admin_users`/`admin_sessions`
+table names until they're redeployed on `single-auth` `v0.2.0`.

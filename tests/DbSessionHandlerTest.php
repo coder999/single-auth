@@ -20,7 +20,7 @@ final class DbSessionHandlerTest extends TestCase
         $this->pdo = new PDO('sqlite::memory:');
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-        $this->pdo->exec('CREATE TABLE admin_sessions (
+        $this->pdo->exec('CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             data TEXT NOT NULL,
             last_activity TEXT NOT NULL
@@ -35,9 +35,9 @@ final class DbSessionHandlerTest extends TestCase
 
     public function testWriteThenReadRoundTrips(): void
     {
-        $this->handler->write('sess1', 'admin_id|i:1;');
+        $this->handler->write('sess1', 'user_id|i:1;');
 
-        $this->assertSame('admin_id|i:1;', $this->handler->read('sess1'));
+        $this->assertSame('user_id|i:1;', $this->handler->read('sess1'));
     }
 
     public function testWriteTwiceUpdatesInPlace(): void
@@ -46,7 +46,7 @@ final class DbSessionHandlerTest extends TestCase
         $this->handler->write('sess1', 'second');
 
         $this->assertSame('second', $this->handler->read('sess1'));
-        $count = (int)$this->pdo->query('SELECT COUNT(*) AS n FROM admin_sessions')->fetch()['n'];
+        $count = (int)$this->pdo->query('SELECT COUNT(*) AS n FROM sessions')->fetch()['n'];
         $this->assertSame(1, $count);
     }
 
@@ -63,9 +63,9 @@ final class DbSessionHandlerTest extends TestCase
     {
         $fresh = (new \DateTimeImmutable())->format('Y-m-d H:i:s');
         $stale = (new \DateTimeImmutable('-2 hours'))->format('Y-m-d H:i:s');
-        $this->pdo->prepare('INSERT INTO admin_sessions (id, data, last_activity) VALUES (?, ?, ?)')
+        $this->pdo->prepare('INSERT INTO sessions (id, data, last_activity) VALUES (?, ?, ?)')
             ->execute(['fresh', 'a', $fresh]);
-        $this->pdo->prepare('INSERT INTO admin_sessions (id, data, last_activity) VALUES (?, ?, ?)')
+        $this->pdo->prepare('INSERT INTO sessions (id, data, last_activity) VALUES (?, ?, ?)')
             ->execute(['stale', 'b', $stale]);
 
         $this->handler->gc(3600); // 1 hour max lifetime
@@ -82,7 +82,7 @@ final class DbSessionHandlerTest extends TestCase
             // process-wide default timezone is Denver.
             $this->handler->write('denver-sess', 'data');
 
-            $row = $this->pdo->query("SELECT last_activity FROM admin_sessions WHERE id = 'denver-sess'")
+            $row = $this->pdo->query("SELECT last_activity FROM sessions WHERE id = 'denver-sess'")
                 ->fetch(PDO::FETCH_ASSOC);
             $stored = new DateTimeImmutable($row['last_activity'], new DateTimeZone('UTC'));
             $trueUtcNow = new DateTimeImmutable('now', new DateTimeZone('UTC'));
@@ -96,7 +96,7 @@ final class DbSessionHandlerTest extends TestCase
             // must still be collected by gc(3600) even though gc() is
             // invoked while the ambient timezone is Denver.
             $staleUtc = (new DateTimeImmutable('-2 hours', new DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-            $this->pdo->prepare('INSERT INTO admin_sessions (id, data, last_activity) VALUES (?, ?, ?)')
+            $this->pdo->prepare('INSERT INTO sessions (id, data, last_activity) VALUES (?, ?, ?)')
                 ->execute(['denver-stale', 'x', $staleUtc]);
 
             $this->handler->gc(3600); // 1 hour max lifetime
