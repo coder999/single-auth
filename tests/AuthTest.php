@@ -4,22 +4,22 @@ declare(strict_types=1);
 
 namespace Mtmd\SingleAuth\Tests;
 
-use Mtmd\SingleAuth\AdminAuth;
+use Mtmd\SingleAuth\Auth;
 use PDO;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
-final class AdminAuthTest extends TestCase
+final class AuthTest extends TestCase
 {
     private PDO $pdo;
-    private AdminAuth $auth;
+    private Auth $auth;
 
     protected function setUp(): void
     {
         $this->pdo = new PDO('sqlite::memory:');
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-        $this->pdo->exec('CREATE TABLE admin_users (
+        $this->pdo->exec('CREATE TABLE users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
@@ -32,26 +32,26 @@ final class AdminAuthTest extends TestCase
             attempted_at TEXT NOT NULL
         )');
 
-        $this->auth = new AdminAuth($this->pdo, ['cookie_domain' => '.nexus.local']);
+        $this->auth = new Auth($this->pdo, ['cookie_domain' => '.nexus.local']);
         $this->auth->sessionStart();
         $_SESSION = [];
         $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
     }
 
     #[RunInSeparateProcess]
-    public function testCurrentAdminReturnsNullWithNoSession(): void
+    public function testCurrentUserReturnsNullWithNoSession(): void
     {
-        $this->assertNull($this->auth->currentAdmin());
+        $this->assertNull($this->auth->currentUser());
     }
 
     #[RunInSeparateProcess]
-    public function testCurrentAdminReturnsUserWhenSessionHasAdminId(): void
+    public function testCurrentUserReturnsUserWhenSessionHasUserId(): void
     {
-        $this->pdo->prepare('INSERT INTO admin_users (id, username, password_hash) VALUES (1, ?, ?)')
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (1, ?, ?)')
             ->execute(['alice', password_hash('secret', PASSWORD_DEFAULT)]);
-        $_SESSION['admin_id'] = 1;
+        $_SESSION['user_id'] = 1;
 
-        $user = $this->auth->currentAdmin();
+        $user = $this->auth->currentUser();
 
         $this->assertNotNull($user);
         $this->assertSame('alice', $user['username']);
@@ -60,11 +60,11 @@ final class AdminAuthTest extends TestCase
     }
 
     #[RunInSeparateProcess]
-    public function testCurrentAdminReturnsNullWhenSessionUserWasDeleted(): void
+    public function testCurrentUserReturnsNullWhenSessionUserWasDeleted(): void
     {
-        $_SESSION['admin_id'] = 999;
+        $_SESSION['user_id'] = 999;
 
-        $this->assertNull($this->auth->currentAdmin());
+        $this->assertNull($this->auth->currentUser());
     }
 
     #[RunInSeparateProcess]
@@ -100,25 +100,25 @@ final class AdminAuthTest extends TestCase
     #[RunInSeparateProcess]
     public function testAttemptLoginSucceedsWithCorrectPassword(): void
     {
-        $this->pdo->prepare('INSERT INTO admin_users (id, username, password_hash) VALUES (1, ?, ?)')
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (1, ?, ?)')
             ->execute(['alice', password_hash('secret', PASSWORD_DEFAULT)]);
 
         $result = $this->auth->attemptLogin('alice', 'secret');
 
         $this->assertTrue($result);
-        $this->assertSame(1, $_SESSION['admin_id']);
+        $this->assertSame(1, $_SESSION['user_id']);
     }
 
     #[RunInSeparateProcess]
     public function testAttemptLoginFailsWithWrongPasswordAndRecordsAttempt(): void
     {
-        $this->pdo->prepare('INSERT INTO admin_users (id, username, password_hash) VALUES (1, ?, ?)')
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (1, ?, ?)')
             ->execute(['alice', password_hash('secret', PASSWORD_DEFAULT)]);
 
         $result = $this->auth->attemptLogin('alice', 'wrong');
 
         $this->assertFalse($result);
-        $this->assertArrayNotHasKey('admin_id', $_SESSION);
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
         $count = (int)$this->pdo->query('SELECT COUNT(*) AS n FROM login_attempts')->fetch()['n'];
         $this->assertSame(1, $count);
     }
@@ -126,7 +126,7 @@ final class AdminAuthTest extends TestCase
     #[RunInSeparateProcess]
     public function testAttemptLoginClearsPriorAttemptsOnSuccess(): void
     {
-        $this->pdo->prepare('INSERT INTO admin_users (id, username, password_hash) VALUES (1, ?, ?)')
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (1, ?, ?)')
             ->execute(['alice', password_hash('secret', PASSWORD_DEFAULT)]);
         $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')
             ->execute(['127.0.0.1', (new \DateTimeImmutable())->format('Y-m-d H:i:s')]);
@@ -140,7 +140,7 @@ final class AdminAuthTest extends TestCase
     #[RunInSeparateProcess]
     public function testLoginThrottledAfterMaxAttempts(): void
     {
-        $auth = new AdminAuth($this->pdo, ['cookie_domain' => '.nexus.local', 'login_max_attempts' => 3]);
+        $auth = new Auth($this->pdo, ['cookie_domain' => '.nexus.local', 'login_max_attempts' => 3]);
         $now = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s');
         $stmt = $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)');
         for ($i = 0; $i < 3; $i++) {
@@ -153,7 +153,7 @@ final class AdminAuthTest extends TestCase
     #[RunInSeparateProcess]
     public function testLoginNotThrottledWhenAttemptsAreOld(): void
     {
-        $auth = new AdminAuth($this->pdo, ['cookie_domain' => '.nexus.local', 'login_max_attempts' => 1, 'login_window_seconds' => 60]);
+        $auth = new Auth($this->pdo, ['cookie_domain' => '.nexus.local', 'login_max_attempts' => 1, 'login_window_seconds' => 60]);
         $old = (new \DateTimeImmutable('-2 hours'))->format('Y-m-d H:i:s');
         $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')
             ->execute(['127.0.0.1', $old]);
@@ -164,7 +164,7 @@ final class AdminAuthTest extends TestCase
     #[RunInSeparateProcess]
     public function testLogoutClearsSession(): void
     {
-        $_SESSION['admin_id'] = 1;
+        $_SESSION['user_id'] = 1;
         $_SESSION['csrf'] = 'token';
 
         $this->auth->logout();

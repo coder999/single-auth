@@ -6,7 +6,7 @@ namespace Mtmd\SingleAuth;
 
 use PDO;
 
-final class AdminAuth
+final class Auth
 {
     private PDO $pdo;
     private string $cookieName;
@@ -18,7 +18,7 @@ final class AdminAuth
     public function __construct(PDO $pdo, array $options = [])
     {
         $this->pdo = $pdo;
-        $this->cookieName = $options['cookie_name'] ?? 'mtmd_admin';
+        $this->cookieName = $options['cookie_name'] ?? 'identity_session';
         // '' (host-only) matches marktuttlemd's current live cookie
         // behavior — callers pass '.marktuttlemd.com' / '.nexus.local'
         // only once they're ready for cross-subdomain sharing.
@@ -45,14 +45,14 @@ final class AdminAuth
         session_start();
     }
 
-    public function currentAdmin(): ?array
+    public function currentUser(): ?array
     {
         $this->sessionStart();
-        if (empty($_SESSION['admin_id'])) {
+        if (empty($_SESSION['user_id'])) {
             return null;
         }
-        $st = $this->pdo->prepare('SELECT id, username, last_login FROM admin_users WHERE id = ?');
-        $st->execute([$_SESSION['admin_id']]);
+        $st = $this->pdo->prepare('SELECT id, username, last_login FROM users WHERE id = ?');
+        $st->execute([$_SESSION['user_id']]);
         $user = $st->fetch(PDO::FETCH_ASSOC);
         if ($user === false) {
             return null;
@@ -61,9 +61,9 @@ final class AdminAuth
         return $user;
     }
 
-    public function requireAdmin(string $loginUrl = 'login.php'): array
+    public function requireLogin(string $loginUrl = 'login.php'): array
     {
-        $user = $this->currentAdmin();
+        $user = $this->currentUser();
         if ($user === null) {
             header('Location: ' . $loginUrl);
             exit;
@@ -113,16 +113,16 @@ final class AdminAuth
     public function attemptLogin(string $username, string $password): bool
     {
         $this->sessionStart();
-        $st = $this->pdo->prepare('SELECT * FROM admin_users WHERE username = ?');
+        $st = $this->pdo->prepare('SELECT * FROM users WHERE username = ?');
         $st->execute([$username]);
         $user = $st->fetch(PDO::FETCH_ASSOC);
 
         if ($user !== false && password_verify($password, $user['password_hash'])) {
             $this->pdo->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$this->clientIp()]);
             session_regenerate_id(true);
-            $_SESSION['admin_id'] = (int)$user['id'];
+            $_SESSION['user_id'] = (int)$user['id'];
             $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-            $this->pdo->prepare('UPDATE admin_users SET last_login = ? WHERE id = ?')->execute([$now, $user['id']]);
+            $this->pdo->prepare('UPDATE users SET last_login = ? WHERE id = ?')->execute([$now, $user['id']]);
             return true;
         }
 
