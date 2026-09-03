@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace Mtmd\SingleAuth\Tests;
+namespace Coder999\SingleAuth\Tests;
 
-use Mtmd\SingleAuth\DbSessionHandler;
+use Coder999\SingleAuth\DbSessionHandler;
 use PDO;
 use PHPUnit\Framework\TestCase;
 use DateTimeImmutable;

@@ -11,9 +11,9 @@ projects were built.
 
 ## What this is
 
-- `Mtmd\SingleAuth\Auth` — session bootstrap, identity lookup, CSRF
+- `Coder999\SingleAuth\Auth` — session bootstrap, identity lookup, CSRF
   helpers, login/logout, login throttling.
-- `Mtmd\SingleAuth\DbSessionHandler` — a `SessionHandlerInterface`
+- `Coder999\SingleAuth\DbSessionHandler` — a `SessionHandlerInterface`
   implementation backing PHP sessions with a database table instead of
   local disk, so session state doesn't depend on consuming apps sharing a
   filesystem.
@@ -25,12 +25,12 @@ see the design doc's "Authn vs authz" section for why.
 
 ```php
 $pdo = new PDO($identityDsn, $identityUser, $identityPass, [...]);
-$auth = new \Mtmd\SingleAuth\Auth($pdo, [
+$auth = new \Coder999\SingleAuth\Auth($pdo, [
     'cookie_domain' => $isLocal ? '.yourdomain.local' : '.yourdomain.com',
     'cookie_secure' => !$isLocal,
 ]);
 
-session_set_save_handler(new \Mtmd\SingleAuth\DbSessionHandler($pdo), true);
+session_set_save_handler(new \Coder999\SingleAuth\DbSessionHandler($pdo), true);
 
 $user = $auth->requireLogin(); // redirects to login.php if not logged in
 ```

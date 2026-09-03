@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Mtmd\SingleAuth;
+namespace Coder999\SingleAuth;
 
 use PDO;
 

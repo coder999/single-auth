@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace Mtmd\SingleAuth\Tests;
+namespace Coder999\SingleAuth\Tests;
 
-use Mtmd\SingleAuth\Auth;
+use Coder999\SingleAuth\Auth;
 use PDO;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;

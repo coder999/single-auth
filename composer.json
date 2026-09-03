@@ -12,12 +12,12 @@
     },
     "autoload": {
         "psr-4": {
-            "Mtmd\\SingleAuth\\": "src/"
+            "Coder999\\SingleAuth\\": "src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "Mtmd\\SingleAuth\\Tests\\": "tests/"
+            "Coder999\\SingleAuth\\Tests\\": "tests/"
         }
     }
 }
