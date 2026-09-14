@@ -119,16 +119,36 @@ final class Auth
 
         if ($user !== false && password_verify($password, $user['password_hash'])) {
             $this->pdo->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$this->clientIp()]);
-            session_regenerate_id(true);
-            $_SESSION['user_id'] = (int)$user['id'];
-            $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-            $this->pdo->prepare('UPDATE users SET last_login = ? WHERE id = ?')->execute([$now, $user['id']]);
+            $this->loginAs((int)$user['id']);
             return true;
         }
 
         $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
         $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')->execute([$this->clientIp(), $now]);
         return false;
+    }
+
+    /**
+     * Establish a logged-in session for a user id.
+     *
+     * DANGER: this verifies NO credential. It is the shared tail of every
+     * authentication path (password, passkey), and calling it directly
+     * from application code is an authentication bypass. Only call it
+     * after you have actually authenticated the user by some means.
+     */
+    public function loginAs(int $userId): bool
+    {
+        $this->sessionStart();
+        $st = $this->pdo->prepare('SELECT id FROM users WHERE id = ?');
+        $st->execute([$userId]);
+        if ($st->fetch(PDO::FETCH_ASSOC) === false) {
+            return false;
+        }
+        session_regenerate_id(true);
+        $_SESSION['user_id'] = $userId;
+        $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
+        $this->pdo->prepare('UPDATE users SET last_login = ? WHERE id = ?')->execute([$now, $userId]);
+        return true;
     }
 
     public function logout(): void

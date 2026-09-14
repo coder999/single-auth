@@ -180,4 +180,37 @@ final class AuthTest extends TestCase
 
         $this->assertSame([], $_SESSION);
     }
+
+    #[RunInSeparateProcess]
+    public function testLoginAsEstablishesSessionForExistingUser(): void
+    {
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (7, ?, ?)')
+            ->execute(['carol', password_hash('pw', PASSWORD_DEFAULT)]);
+
+        $this->assertTrue($this->auth->loginAs(7));
+        $this->assertSame(7, $_SESSION['user_id']);
+
+        $user = $this->auth->currentUser();
+        $this->assertNotNull($user);
+        $this->assertSame('carol', $user['username']);
+    }
+
+    #[RunInSeparateProcess]
+    public function testLoginAsReturnsFalseForUnknownUserAndSetsNoSession(): void
+    {
+        $this->assertFalse($this->auth->loginAs(999));
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
+
+    #[RunInSeparateProcess]
+    public function testLoginAsStampsLastLogin(): void
+    {
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (8, ?, ?)')
+            ->execute(['dave', password_hash('pw', PASSWORD_DEFAULT)]);
+
+        $this->auth->loginAs(8);
+
+        $st = $this->pdo->query('SELECT last_login FROM users WHERE id = 8');
+        $this->assertNotNull($st->fetch(PDO::FETCH_ASSOC)['last_login']);
+    }
 }
