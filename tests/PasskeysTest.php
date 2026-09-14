@@ -154,9 +154,39 @@ final class PasskeysTest extends TestCase
 
         $this->assertNotEmpty($_SESSION['passkey_challenge']);
         $this->assertSame('register', $_SESSION['passkey_purpose']);
+        $this->assertSame(1, $_SESSION['passkey_user']);
         $this->assertSame('Laptop', $_SESSION['passkey_label']);
         $this->assertGreaterThan(time(), $_SESSION['passkey_expires']);
     }
+
+    /**
+     * Joins the real session written by beginRegistration() to the gate that
+     * reads it, so the two cannot drift apart: the unit tests below prove the
+     * gate, and this proves the gate is looking at what begin actually wrote.
+     */
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationStoresAChallengeTheGateAccepts(): void
+    {
+        $this->makeUser();
+        $this->makeUser(2, 'bob');
+
+        $this->passkeys->beginRegistration(1, 'Laptop');
+
+        $this->assertTrue(Passkeys::challengeIsValid($_SESSION, 'register', 1, time()));
+        $this->assertFalse(Passkeys::challengeIsValid($_SESSION, 'register', 2, time()),
+            'a challenge issued for user 1 must not enrol a credential onto user 2');
+
+        $this->passkeys->finishRegistration(1, '{}');
+
+        $this->assertFalse(Passkeys::challengeIsValid($_SESSION, 'register', 1, time()),
+            'the challenge must be single use');
+    }
+
+    // The next two tests document the public contract, but they cannot
+    // prove the gate: '{}' is rejected further down finishRegistration()
+    // whatever the session holds, and every rejection returns the same
+    // false. The gate itself is covered by the challengeIsValid() tests
+    // below, and joined to the real session by the bridging test above.
 
     #[RunInSeparateProcess]
     public function testFinishRegistrationRejectsWhenNoChallengeInSession(): void
@@ -177,5 +207,126 @@ final class PasskeysTest extends TestCase
         $this->assertFalse($this->passkeys->finishRegistration(1, '{}'));
         $this->assertArrayNotHasKey('passkey_challenge', $_SESSION,
             'a consumed or expired challenge must be cleared, not left to retry');
+    }
+
+    /** A session as beginRegistration(1, ...) leaves it, expiring at t=2000. */
+    private static function issuedSession(array $overrides = []): array
+    {
+        return $overrides + [
+            'passkey_challenge' => 'Y2hhbGxlbmdl',
+            'passkey_purpose'   => 'register',
+            'passkey_user'      => 1,
+            'passkey_expires'   => 2000,
+        ];
+    }
+
+    public function testChallengeGateAcceptsAFreshChallengeForThisCeremony(): void
+    {
+        $this->assertTrue(Passkeys::challengeIsValid(self::issuedSession(), 'register', 1, 1999));
+    }
+
+    public function testChallengeGateRejectsAnAbsentChallenge(): void
+    {
+        $this->assertFalse(Passkeys::challengeIsValid([], 'register', 1, 1999));
+        $this->assertFalse(
+            Passkeys::challengeIsValid(self::issuedSession(['passkey_challenge' => null]), 'register', 1, 1999)
+        );
+    }
+
+    public function testChallengeGateRejectsAChallengeIssuedForAnotherPurpose(): void
+    {
+        $this->assertFalse(
+            Passkeys::challengeIsValid(self::issuedSession(['passkey_purpose' => 'login']), 'register', 1, 1999),
+            'a login challenge must not be redeemable as a registration'
+        );
+    }
+
+    public function testChallengeGateRejectsAChallengeIssuedForAnotherUser(): void
+    {
+        $this->assertFalse(
+            Passkeys::challengeIsValid(self::issuedSession(['passkey_user' => 2]), 'register', 1, 1999)
+        );
+        $this->assertFalse(
+            Passkeys::challengeIsValid(self::issuedSession(['passkey_user' => null]), 'register', 1, 1999),
+            'an unattributed challenge must not enrol onto a named account'
+        );
+        $this->assertFalse(
+            Passkeys::challengeIsValid(self::issuedSession(), 'register', null, 1999),
+            "and a named account's challenge must not satisfy an unattributed ceremony"
+        );
+    }
+
+    public function testChallengeGateRejectsAnExpiredChallenge(): void
+    {
+        $this->assertFalse(
+            Passkeys::challengeIsValid(self::issuedSession(), 'register', 1, 2000),
+            'expiry is exclusive: a challenge is dead on the second it expires'
+        );
+        $this->assertFalse(Passkeys::challengeIsValid(self::issuedSession(), 'register', 1, 2001));
+        $this->assertFalse(
+            Passkeys::challengeIsValid(self::issuedSession(['passkey_expires' => null]), 'register', 1, 1999),
+            'a challenge with no expiry must not be treated as immortal'
+        );
+    }
+
+    // `label` is VARCHAR(64) and `transports` VARCHAR(255). Both widths are
+    // written out here rather than read from the class, so these tests
+    // fail if the constants stop matching the columns.
+
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationRejectsALabelWiderThanItsColumn(): void
+    {
+        $this->makeUser();
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->passkeys->beginRegistration(1, str_repeat('a', 65));
+    }
+
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationAcceptsALabelExactlyAsWideAsItsColumn(): void
+    {
+        $this->makeUser();
+        $label = str_repeat('a', 64);
+
+        $this->passkeys->beginRegistration(1, $label);
+
+        $this->assertSame($label, $_SESSION['passkey_label']);
+    }
+
+    #[RunInSeparateProcess]
+    public function testLabelWidthIsCountedInCharactersNotBytes(): void
+    {
+        $this->makeUser();
+        $label = str_repeat('é', 64);   // 64 characters, 128 bytes
+        $this->assertSame(128, strlen($label), 'guard: this label must be multi-byte');
+
+        $this->passkeys->beginRegistration(1, $label);
+
+        $this->assertSame($label, $_SESSION['passkey_label'],
+            'the column counts characters, so a byte count would reject a legal label');
+    }
+
+    public static function transportPackings(): array
+    {
+        return [
+            'typical'                  => [['internal', 'hybrid'], 'internal,hybrid'],
+            'unknown transports kept'  => [['a-future-transport'], 'a-future-transport'],
+            'empty means unknown'      => [[], null],
+            'a comma cannot round-trip so the value is dropped'
+                                       => [['int,ernal', 'hybrid'], 'hybrid'],
+            'packing stops at whole values'
+                                       => [[str_repeat('a', 200), str_repeat('b', 200)], str_repeat('a', 200)],
+            'a single over-wide value is dropped'
+                                       => [[str_repeat('a', 300)], null],
+        ];
+    }
+
+    #[DataProvider('transportPackings')]
+    public function testTransportsArePackedToFitTheirColumn(array $transports, ?string $expected): void
+    {
+        $packed = Passkeys::packTransports($transports);
+
+        $this->assertSame($expected, $packed);
+        $this->assertLessThanOrEqual(255, strlen((string)$packed));
     }
 }

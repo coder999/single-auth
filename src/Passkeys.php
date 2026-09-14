@@ -26,6 +26,18 @@ use Webauthn\PublicKeyCredentialUserEntity;
 
 final class Passkeys
 {
+    /**
+     * Widths of the columns these values end up in
+     * (`db/migrations/20260914115641_add_passkey_credentials.sql`). They are
+     * enforced here, at the last point before the user is asked to touch an
+     * authenticator, because the alternative is a PDOException thrown out of
+     * finishRegistration() *after* a ceremony the user has already completed.
+     *
+     * VARCHAR(n) on utf8mb4 counts characters, not bytes, hence mb_strlen().
+     */
+    public const MAX_LABEL_LENGTH = 64;
+    private const MAX_TRANSPORTS_LENGTH = 255;
+
     private PDO $pdo;
     private Auth $auth;
     private string $rpId;
@@ -75,15 +87,30 @@ final class Passkeys
     /**
      * Returns the credential creation options as JSON, for the browser to
      * hand to navigator.credentials.create().
+     *
+     * @throws InvalidArgumentException if the user does not exist, or the
+     *         label is wider than the column that has to hold it.
      */
     public function beginRegistration(int $userId, string $label): string
     {
+        if (mb_strlen($label) > self::MAX_LABEL_LENGTH) {
+            throw new InvalidArgumentException(
+                'Passkey label may not exceed ' . self::MAX_LABEL_LENGTH . ' characters.'
+            );
+        }
+
+        $username = $this->username($userId);
+        if ($username === null) {
+            throw new InvalidArgumentException('No such user.');
+        }
+        $user = self::userEntity($username, $this->ensureUserHandle($userId));
+
         $challenge = random_bytes(32);
-        $options = $this->creationOptions($userId, $challenge);
+        $options = $this->creationOptions($user, $challenge);
 
         // Stored base64url so the challenge survives session serialisation
         // as text; the library wants the raw bytes back on the way in.
-        $this->storeChallenge(self::b64u($challenge), 'register', $label);
+        $this->storeChallenge(self::b64u($challenge), 'register', $userId, $label);
 
         return $this->serializer()->serialize($options, 'json');
     }
@@ -95,12 +122,23 @@ final class Passkeys
      */
     public function finishRegistration(int $userId, string $clientJson): bool
     {
-        $challenge = $this->consumeChallenge('register');
+        $challenge = $this->consumeChallenge('register', $userId);
         $label = (string)($_SESSION['passkey_label'] ?? '');
         unset($_SESSION['passkey_label']);
         if ($challenge === null) {
             return false;
         }
+
+        // Read the user outside the try, so a database failure here surfaces
+        // as an exception rather than being swallowed as "credential
+        // rejected". The handle must already exist: beginRegistration()
+        // created it, and its absence means no ceremony was ever begun.
+        $username = $this->username($userId);
+        $handle = $this->userHandle($userId);
+        if ($username === null || $handle === null) {
+            return false;
+        }
+        $user = self::userEntity($username, $handle);
 
         try {
             $credential = $this->serializer()->deserialize($clientJson, PublicKeyCredential::class, 'json');
@@ -129,13 +167,15 @@ final class Passkeys
             );
             $record = $validator->check(
                 $response,
-                $this->creationOptions($userId, self::b64uDecode($challenge)),
+                $this->creationOptions($user, self::b64uDecode($challenge)),
                 (string)parse_url($origin, PHP_URL_HOST),
             );
         } catch (Throwable) {
             // check() signals failure by throwing, and a malformed payload
             // throws out of deserialize(). Neither is something the caller
-            // can act on beyond "that did not work".
+            // can act on beyond "that did not work". Nothing inside this
+            // block touches the database, so no database error is hidden
+            // by it.
             return false;
         }
 
@@ -149,7 +189,7 @@ final class Passkeys
             self::b64u($record->publicKeyCredentialId),
             self::b64u($record->credentialPublicKey),
             $record->counter,
-            $record->transports === [] ? null : implode(',', $record->transports),
+            self::packTransports($record->transports),
             $label,
             $now,
         ]);
@@ -189,53 +229,138 @@ final class Passkeys
         return (string)base64_decode(strtr($encoded, '-_', '+/'), true);
     }
 
-    private function storeChallenge(string $challenge, string $purpose, ?string $label = null): void
-    {
+    /**
+     * $userId is the account the ceremony is for, or null for a login
+     * ceremony, where nobody is identified until the assertion comes back.
+     */
+    private function storeChallenge(
+        string $challenge,
+        string $purpose,
+        ?int $userId = null,
+        ?string $label = null
+    ): void {
         $this->auth->sessionStart();
         $_SESSION['passkey_challenge'] = $challenge;
         $_SESSION['passkey_purpose']   = $purpose;
+        $_SESSION['passkey_user']      = $userId;
         $_SESSION['passkey_expires']   = time() + $this->challengeTtl;
         $_SESSION['passkey_label']     = $label;
     }
 
-    /** Returns the challenge if valid for $purpose, and always clears it. */
-    private function consumeChallenge(string $purpose): ?string
+    /** Returns the challenge if the gate below accepts it, and always clears it. */
+    private function consumeChallenge(string $purpose, ?int $userId = null): ?string
     {
         $this->auth->sessionStart();
         $challenge = $_SESSION['passkey_challenge'] ?? null;
-        $ok = $challenge !== null
-            && ($_SESSION['passkey_purpose'] ?? null) === $purpose
-            && (int)($_SESSION['passkey_expires'] ?? 0) > time();
+        $ok = self::challengeIsValid($_SESSION, $purpose, $userId, time());
 
         // Cleared whether or not it was valid: single use, no retries.
-        unset($_SESSION['passkey_challenge'], $_SESSION['passkey_purpose'], $_SESSION['passkey_expires']);
+        unset(
+            $_SESSION['passkey_challenge'],
+            $_SESSION['passkey_purpose'],
+            $_SESSION['passkey_user'],
+            $_SESSION['passkey_expires'],
+        );
 
         return $ok ? (string)$challenge : null;
     }
 
     /**
-     * The options the browser is given at begin time, and the same options
-     * rebuilt at finish time so the library can check the response against
-     * them. Both must agree, so there is one builder.
+     * The challenge gate, as a pure function of the session array and the
+     * current time. Four independent conditions: a challenge exists, it was
+     * issued for this ceremony, it was issued for this account, and it has
+     * not expired.
+     *
+     * @internal Public only so it can be tested. It has no side effects and
+     *   reads nothing but its arguments, so exposing it costs nothing —
+     *   whereas leaving it inside a private method of a final class costs a
+     *   great deal: every rejection in finishRegistration() returns the same
+     *   `false`, and the challenge keys are cleared unconditionally, so no
+     *   test driving the public API can tell a working gate from a missing
+     *   one. Reviewed 2026-09-14 after exactly that was found to be true of
+     *   the two tests that appeared to cover it.
+     *
+     * @param array<string,mixed> $session
      */
-    private function creationOptions(int $userId, string $rawChallenge): PublicKeyCredentialCreationOptions
+    public static function challengeIsValid(array $session, string $purpose, ?int $userId, int $now): bool
+    {
+        if (($session['passkey_challenge'] ?? null) === null) {
+            return false;
+        }
+        if (($session['passkey_purpose'] ?? null) !== $purpose) {
+            return false;
+        }
+        $storedUser = $session['passkey_user'] ?? null;
+        if (($storedUser === null ? null : (int)$storedUser) !== $userId) {
+            return false;
+        }
+        return (int)($session['passkey_expires'] ?? 0) > $now;
+    }
+
+    private function username(int $userId): ?string
     {
         $st = $this->pdo->prepare('SELECT username FROM users WHERE id = ?');
         $st->execute([$userId]);
         $row = $st->fetch(PDO::FETCH_ASSOC);
-        if ($row === false) {
-            throw new InvalidArgumentException('No such user.');
-        }
-        $username = (string)$row['username'];
-        $handle = $this->ensureUserHandle($userId);
+        return $row === false ? null : (string)$row['username'];
+    }
 
+    /** $handle is base64url as stored; the library wants the raw bytes. */
+    private static function userEntity(string $username, string $handle): PublicKeyCredentialUserEntity
+    {
+        return PublicKeyCredentialUserEntity::create($username, self::b64uDecode($handle), $username);
+    }
+
+    /**
+     * Comma-joined for the `transports` column, dropping anything that
+     * cannot survive that encoding or that column.
+     *
+     * Both filters are defensive rather than expected: this array is
+     * whatever the browser put in getTransports(), and webauthn-lib does
+     * not validate it against its own list. A real authenticator sends a
+     * handful of short tokens, so nothing is dropped in practice — but
+     * transports are an advisory UI hint, and losing one must never be
+     * able to fail an enrolment the user has already completed.
+     *
+     * @internal Public for the same reason as challengeIsValid(): a pure
+     *   function with no other route to a test, since its only caller is
+     *   the happy path, which needs an authenticator.
+     *
+     * @param string[] $transports
+     */
+    public static function packTransports(array $transports): ?string
+    {
+        $packed = '';
+        foreach ($transports as $transport) {
+            if (str_contains($transport, ',')) {
+                continue; // would not round-trip out of a comma-joined column
+            }
+            $candidate = $packed === '' ? $transport : $packed . ',' . $transport;
+            if (strlen($candidate) > self::MAX_TRANSPORTS_LENGTH) {
+                break;
+            }
+            $packed = $candidate;
+        }
+        return $packed === '' ? null : $packed;
+    }
+
+    /**
+     * The options the browser is given at begin time, and the same options
+     * rebuilt at finish time so the library can check the response against
+     * them. Both must agree, so there is one builder — and it reads nothing
+     * but its arguments, so building options can never write to `users`.
+     */
+    private function creationOptions(
+        PublicKeyCredentialUserEntity $user,
+        string $rawChallenge
+    ): PublicKeyCredentialCreationOptions {
         return PublicKeyCredentialCreationOptions::create(
             // rp.name is deprecated since webauthn-lib 5.3.0 and a non-empty
             // name triggers a deprecation notice; the serializer defaults
             // rp.name to the rp id. So $this->rpName stays our own option
             // and the library gets ''.
             PublicKeyCredentialRpEntity::create('', $this->rpId),
-            PublicKeyCredentialUserEntity::create($username, self::b64uDecode($handle), $username),
+            $user,
             $rawChallenge,
             [
                 // Only these two are verifiable by the library's default
