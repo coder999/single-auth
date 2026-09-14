@@ -94,6 +94,13 @@ The four ceremony methods are:
 | `beginLogin()` | Raw WebAuthn request-options JSON (`string`) |
 | `finishLogin(string $clientJson)` | The authenticated user row (`array`) or `null` |
 
+`beginRegistration()` throws `InvalidArgumentException` on an unknown user
+or a label that is over 64 characters or not valid UTF-8 — validate and
+report those before starting a ceremony. `finishRegistration()` returns
+`false` rather than throwing for anything the authenticator itself produces,
+including a credential id too wide for the column and a credential that is
+already enrolled.
+
 Registration must use the ID of the currently authenticated user; never
 accept a user ID supplied by the browser. Protect registration begin,
 registration finish, and credential deletion with CSRF checks. The supplied
@@ -121,8 +128,18 @@ function requireJsonCsrf(Auth $auth): void
 }
 
 $user = $auth->requireLogin();
-$body = json_decode(file_get_contents('php://input'), true, 512, JSON_THROW_ON_ERROR);
 requireJsonCsrf($auth);
+
+// Decode after the CSRF check, and catch: JSON_THROW_ON_ERROR on unchecked
+// input is an uncaught JsonException, i.e. a 500 on malformed input.
+try {
+    $body = json_decode(file_get_contents('php://input'), true, 512, JSON_THROW_ON_ERROR);
+} catch (JsonException) {
+    http_response_code(400);
+    echo json_encode(['ok' => false, 'error' => 'Malformed request.']);
+    exit;
+}
+$action = (string)($_GET['action'] ?? '');
 
 if ($action === 'register-begin') {
     echo $passkeys->beginRegistration((int)$user['id'], (string)($body['label'] ?? ''));
