@@ -21,10 +21,21 @@ tables, since a mistake affects every consumer at once, not just this repo.
 4. Apply locally to verify:
    `DATABASE_URL="mysql://root:ChangeThisRootPassword@127.0.0.1:3306/single_auth" dbmate --migrations-dir db/migrations up`
 5. Confirm the `db/schema.sql` diff matches intent; stage both files.
-6. Production schema changes **only** happen via
-   `.github/workflows/migrate.yml` (manually triggered), which runs
-   `dbmate up` over SSH on the IONOS host itself — never by connecting to
-   the production database directly from a dev machine.
+6. Production schema changes happen **only** on the VPS, by hand, via
+   `vps-infra`'s `sites/single-auth/bin/migrate.sh` — never by connecting
+   to the production database directly from a dev machine. That script
+   owns the whole procedure (staging the migrations, credentials, TLS);
+   read it rather than reconstructing the commands from here. Verified
+   end-to-end against production 2026-09-13: `migrate.sh status` reported
+   both migrations applied, 0 pending.
+
+   There used to be a `.github/workflows/migrate.yml` in this repo that
+   ran `dbmate up` over SSH against **IONOS**. It was deleted 2026-09-13.
+   `single_auth` moved onto the VPS on 2026-08-21 and that workflow was
+   never repointed, so triggering it would have migrated the abandoned
+   IONOS database while production read a different one — going green
+   while changing nothing that matters. Git remembers it; do not
+   resurrect it.
 
 ## No SQL dialect-specific syntax in `src/`
 
@@ -37,10 +48,35 @@ instead of needing a live MySQL for every test run. Keep any new code in
 
 ## Consumers
 
-`marktuttlemd` and `mdproductivity` both require this package via a
-Composer VCS repository entry pointing at this (public) GitHub repo — no
-Composer auth token needed to fetch it — and each holds its own
-`identity_auth` database credentials (scoped to `single_auth.*` only)
-alongside its own app-database credentials. See
-`docs/superpowers/specs/2026-08-12-single-auth-design.md` for the full
-authn/authz split rationale.
+Four apps require this package via a Composer VCS repository entry
+pointing at this (public) GitHub repo — no Composer auth token needed to
+fetch it: `marktuttlemd`, `mdproductivity`, `console` and
+`3mensioxmlparser`. Don't trust that list without re-deriving it; from
+`~/docker/html-local`:
+
+```bash
+for d in */; do d=${d%/}; [ -f "$d/composer.json" ] || continue
+  grep -q 'coder999/single-auth' "$d/composer.json" && echo "$d"
+done
+```
+
+Each holds its own dedicated MySQL user scoped to `single_auth.*`,
+alongside its own app-database credentials. The design doc
+(`docs/superpowers/specs/2026-08-12-single-auth-design.md`) describes a
+single shared `identity_auth` user for this — that is **not** what was
+built. Production gives each consumer its own user, which is the better
+arrangement; the doc is stale on this point. Confirmed 2026-09-13.
+
+This repo is **public**, so the actual usernames and grants are
+deliberately not written down here — see `vps-infra` (private) for the
+identity database's real user inventory, and note that
+`single-auth-mariadb` publishes 3306 for a remote consumer, which is why
+enumerating valid usernames in public would be doing an attacker's
+reconnaissance for them.
+
+At least one non-Composer consumer also reaches `single-auth-mariadb`
+directly via a `vps-infra` nginx/PHP gate rather than through this
+library. `vps-infra/sites/` is authoritative for who talks to that
+database; this file is only authoritative for who uses this package.
+
+See the design doc for the full authn/authz split rationale.

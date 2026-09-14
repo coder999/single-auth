@@ -67,10 +67,17 @@ check — just call it and continue if it returns.
 
 Standard dbmate migration workflow — see `CLAUDE.md`.
 
+Production migrations are applied by hand on the VPS, using `vps-infra`'s
+`sites/single-auth/bin/migrate.sh`. This repo deliberately ships no
+migration CI: the procedure lives in that script, which is the only copy
+of it (verified against production 2026-09-13).
+
 **Migration `20260813020513_rename_admin_tables` is not safe to run in
-isolation** — running it via `.github/workflows/migrate.yml` outside the
-coordinated 3-repo cutover documented in
-`docs/superpowers/specs/2026-08-13-auth-rename.md` breaks both consuming
-sites (`marktuttlemd`, `mdproductivity`) immediately, since their
-currently-deployed code queries the old `admin_users`/`admin_sessions`
-table names until they're redeployed on `single-auth` `v0.2.0`.
+isolation against a database whose consumers are still on `v0.1.x`** —
+it renames `admin_users`/`admin_sessions` to `users`/`sessions`, so any
+consumer whose deployed code still queries the old names breaks the
+moment it lands. See `docs/superpowers/specs/2026-08-13-auth-rename.md`
+for the coordinated cutover this was originally part of. This is now only
+a concern when bootstrapping a fresh database (local dev, or a rebuilt
+production instance); both migrations have been applied in production
+since the 2026-08-13 cutover, confirmed 2026-09-13.
