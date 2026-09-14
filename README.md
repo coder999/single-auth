@@ -63,6 +63,23 @@ check — just call it and continue if it returns.
 | `login_max_attempts`    | `8`            | Failed attempts allowed per IP within `login_window_seconds` before `loginThrottled()` returns `true`. |
 | `login_window_seconds`  | `900`          | Rolling window (seconds) that `login_max_attempts` is counted over. |
 
+### Sharing the login throttle
+
+`attemptLogin()` maintains an IP-keyed failure budget and `loginThrottled()`
+reports it. A consumer that authenticates by some other means — a passkey
+assertion, say — can join the same budget rather than keeping its own:
+
+```php
+if ($auth->loginThrottled()) { /* refuse */ }
+$user = $passkeys->finishLogin($json);
+if ($user === null) { $auth->noteLoginFailure(); }
+else { $auth->clearLoginFailures(); }
+```
+
+The budget is keyed on IP alone, not on the credential type, so every
+credential on one address shares a single lockout: enough failed passkey
+attempts will also lock out password login from that address.
+
 ## Passkeys
 
 Passkeys are an additional login path alongside passwords. Construct

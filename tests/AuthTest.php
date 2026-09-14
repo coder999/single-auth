@@ -171,6 +171,50 @@ final class AuthTest extends TestCase
     }
 
     #[RunInSeparateProcess]
+    public function testNoteLoginFailureCountsTowardTheThrottle(): void
+    {
+        for ($i = 0; $i < 10; $i++) {
+            $this->auth->noteLoginFailure();
+        }
+
+        $this->assertTrue(
+            $this->auth->loginThrottled(),
+            'a consumer must be able to feed the same budget attemptLogin() uses'
+        );
+    }
+
+    #[RunInSeparateProcess]
+    public function testClearLoginFailuresReleasesTheThrottle(): void
+    {
+        for ($i = 0; $i < 10; $i++) {
+            $this->auth->noteLoginFailure();
+        }
+
+        $this->auth->clearLoginFailures();
+
+        $this->assertFalse($this->auth->loginThrottled());
+    }
+
+    /**
+     * The counter is keyed on IP, so one address clearing its own failures
+     * must not release another's.
+     */
+    #[RunInSeparateProcess]
+    public function testClearLoginFailuresIsScopedToTheCallersIp(): void
+    {
+        $_SERVER['REMOTE_ADDR'] = '10.0.0.1';
+        for ($i = 0; $i < 10; $i++) {
+            $this->auth->noteLoginFailure();
+        }
+
+        $_SERVER['REMOTE_ADDR'] = '10.0.0.2';
+        $this->auth->clearLoginFailures();
+
+        $_SERVER['REMOTE_ADDR'] = '10.0.0.1';
+        $this->assertTrue($this->auth->loginThrottled());
+    }
+
+    #[RunInSeparateProcess]
     public function testLogoutClearsSession(): void
     {
         $_SESSION['user_id'] = 1;

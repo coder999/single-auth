@@ -110,6 +110,27 @@ final class Auth
         return (int)$st->fetch(PDO::FETCH_ASSOC)['n'] >= $this->loginMaxAttempts;
     }
 
+    /**
+     * Record one failed authentication against this client IP.
+     *
+     * Public so a consumer adding its own credential type (a passkey
+     * assertion, say) can feed the same budget `attemptLogin()` uses,
+     * rather than reaching into `login_attempts` itself and taking a
+     * second copy of this schema with it.
+     */
+    public function noteLoginFailure(): void
+    {
+        $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
+        $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')
+            ->execute([$this->clientIp(), $now]);
+    }
+
+    /** Clear this client IP's failures. Call after a successful login. */
+    public function clearLoginFailures(): void
+    {
+        $this->pdo->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$this->clientIp()]);
+    }
+
     public function attemptLogin(string $username, string $password): bool
     {
         $this->sessionStart();
@@ -118,7 +139,7 @@ final class Auth
         $user = $st->fetch(PDO::FETCH_ASSOC);
 
         if ($user !== false && password_verify($password, $user['password_hash'])) {
-            $this->pdo->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$this->clientIp()]);
+            $this->clearLoginFailures();
             // loginAs() owns the whole "establish a session" step, including
             // deciding the user still exists. Reporting success when it
             // declined would hand the caller a logged-in user with no
@@ -127,8 +148,7 @@ final class Auth
             return $this->loginAs((int)$user['id']);
         }
 
-        $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-        $this->pdo->prepare('INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)')->execute([$this->clientIp(), $now]);
+        $this->noteLoginFailure();
         return false;
     }
 
