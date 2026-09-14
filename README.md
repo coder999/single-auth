@@ -63,6 +63,111 @@ check — just call it and continue if it returns.
 | `login_max_attempts`    | `8`            | Failed attempts allowed per IP within `login_window_seconds` before `loginThrottled()` returns `true`. |
 | `login_window_seconds`  | `900`          | Rolling window (seconds) that `login_max_attempts` is counted over. |
 
+## Passkeys
+
+Passkeys are an additional login path alongside passwords. Construct
+`Passkeys` with the same identity-database PDO and `Auth` instance. The
+required `rp_id` is the configured cookie domain with its leading dot
+removed:
+
+```php
+use Coder999\SingleAuth\Auth;
+use Coder999\SingleAuth\Passkeys;
+
+$cookieDomain = $isLocal ? '.yourdomain.local' : '.yourdomain.com';
+$auth = new Auth($pdo, [
+    'cookie_domain' => $cookieDomain,
+    'cookie_secure' => !$isLocal,
+]);
+$passkeys = new Passkeys($pdo, $auth, [
+    'rp_id' => ltrim($cookieDomain, '.'),
+    'rp_name' => 'Your application', // optional; defaults to single-auth
+]);
+```
+
+The four ceremony methods are:
+
+| Method | Return value |
+|---|---|
+| `beginRegistration(int $userId, string $label)` | Raw WebAuthn creation-options JSON (`string`) |
+| `finishRegistration(int $userId, string $clientJson)` | `bool`; `true` when the credential was enrolled |
+| `beginLogin()` | Raw WebAuthn request-options JSON (`string`) |
+| `finishLogin(string $clientJson)` | The authenticated user row (`array`) or `null` |
+
+Registration must use the ID of the currently authenticated user; never
+accept a user ID supplied by the browser. Protect registration begin,
+registration finish, and credential deletion with CSRF checks. The supplied
+ES module sends the registration token in `X-CSRF-Token`, while
+`Auth::csrfCheck()` reads `$_POST['csrf']` and exits. A JSON endpoint must
+therefore validate the header explicitly (as below), or deliberately adapt it
+into `$_POST['csrf']` before calling `csrfCheck()`.
+
+The endpoint contract expected by `assets/passkey.js` is simple: each begin
+action responds with the raw options JSON returned by `Passkeys`; each finish
+action responds with `{"ok":true}` or `{"ok":false,"error":"..."}`.
+Here is the core of a registration endpoint:
+
+```php
+header('Content-Type: application/json');
+
+function requireJsonCsrf(Auth $auth): void
+{
+    $sent = (string)($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
+    if ($sent === '' || !hash_equals($auth->csrfToken(), $sent)) {
+        http_response_code(400);
+        echo json_encode(['ok' => false, 'error' => 'Invalid or expired form token.']);
+        exit;
+    }
+}
+
+$user = $auth->requireLogin();
+$body = json_decode(file_get_contents('php://input'), true, 512, JSON_THROW_ON_ERROR);
+requireJsonCsrf($auth);
+
+if ($action === 'register-begin') {
+    echo $passkeys->beginRegistration((int)$user['id'], (string)($body['label'] ?? ''));
+} elseif ($action === 'register-finish') {
+    $ok = $passkeys->finishRegistration((int)$user['id'], json_encode($body, JSON_THROW_ON_ERROR));
+    echo json_encode(['ok' => $ok] + ($ok ? [] : ['error' => 'Passkey registration failed.']));
+}
+```
+
+Login endpoints use the same wire contract. A successful `finishLogin()` has
+already established the shared session. If a consumer applies an allowlist,
+role, or any other authorization check after `attemptLogin()`, it **must apply
+the same check to the user returned by `finishLogin()`**. Otherwise passkey
+login bypasses that authorization. Clear the newly established session when
+authorization denies the user:
+
+```php
+if ($action === 'login-begin') {
+    echo $passkeys->beginLogin();
+} elseif ($action === 'login-finish') {
+    $user = $passkeys->finishLogin(json_encode($body, JSON_THROW_ON_ERROR));
+    $ok = $user !== null && consumerUserAllowed($user);
+    if ($user !== null && !$ok) {
+        $auth->logout();
+    }
+    echo json_encode(['ok' => $ok] + ($ok ? [] : ['error' => 'Passkey login failed.']));
+}
+```
+
+Serve the browser helper through a public PHP endpoint because consumers
+cannot expose files below `vendor/` directly:
+
+```php
+<?php
+declare(strict_types=1);
+
+header('Content-Type: text/javascript; charset=utf-8');
+readfile(__DIR__ . '/vendor/coder999/single-auth/assets/passkey.js');
+```
+
+Import that endpoint as an ES module and call `registerPasskey()` or
+`loginWithPasskey()`. Passkeys require a secure browser context and this
+library accepts only HTTPS origins. Plain-HTTP local development therefore
+uses the existing password login path.
+
 ## Database Migrations (dbmate)
 
 Standard dbmate migration workflow — see `CLAUDE.md`.

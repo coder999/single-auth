@@ -40,16 +40,10 @@
 
 `CLAUDE.md` step 4 currently says to run dbmate against `127.0.0.1:3306`. That cannot work: `single-auth-mariadb` on nexus publishes nothing to the host (`docker inspect` reports `{"3306/tcp":null}`, and nothing listens on 3306). Verified 2026-09-13.
 
-Replace that command with one that joins the container's network:
-
-```bash
-docker run --rm --network identity -v "$PWD/db:/db" \
-  ghcr.io/amacneil/dbmate:v2.35.0 \
-  -u "mysql://root:ChangeThisRootPassword@single-auth-mariadb:3306/single_auth" \
-  --migrations-dir /db/migrations --schema-file /db/schema.sql up
-```
-
-(`ChangeThisRootPassword` is the local-dev placeholder already published in this repo, not a secret.)
+Replace that command with the local migration procedure in `CLAUDE.md`. It
+joins the `identity` network, uses dbmate tag `2.35.0` (without a leading `v`),
+enables the local container's required TLS mode, and reads the current local
+password dynamically rather than copying a credential into this public plan.
 
 - [ ] **Step 2: Create the migration**
 
@@ -121,7 +115,6 @@ that command could not have worked."
 
 **Files:**
 - Modify: `composer.json`
-- Modify: `composer.lock`
 - Create: `docs/superpowers/notes/webauthn-lib-api.md`
 
 **Interfaces:**
@@ -159,7 +152,7 @@ For each, note the file and line you read it from.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add composer.json composer.lock docs/superpowers/notes/webauthn-lib-api.md
+git add composer.json docs/superpowers/notes/webauthn-lib-api.md
 git commit -m "Add web-auth/webauthn-lib, pin its API surface
 
 PHP floor 8.1 -> 8.2 as the library requires; every consumer runs 8.4.
@@ -798,6 +791,12 @@ Expected: FAIL — undefined methods.
 
 **Every `null` return path must leave no session behind** — `loginAs()` is the last step, reached only after all checks pass.
 
+Implementation note: the completed suite includes a `SoftwareAuthenticator`
+fixture using the installed CBOR and OpenSSL libraries. It covers successful
+registration and login, the returned credential owner and session, counter
+write-back, `last_used_at`, and replay rejection. Browser UI integration still
+needs manual verification in a secure context; server happy paths do not.
+
 - [ ] **Step 4: Run the whole suite**
 
 Run: `docker run --rm -v "$PWD:/app" -w /app php:8.4-cli php vendor/bin/phpunit`
@@ -1001,10 +1000,10 @@ export async function registerPasskey(beginUrl, finishUrl, csrfToken, label) {
       id: cred.id,
       rawId: bytesToB64u(cred.rawId),
       type: cred.type,
-      transports: cred.response.getTransports ? cred.response.getTransports() : [],
       response: {
         clientDataJSON: bytesToB64u(cred.response.clientDataJSON),
         attestationObject: bytesToB64u(cred.response.attestationObject),
+        transports: cred.response.getTransports ? cred.response.getTransports() : [],
       },
     }, csrfToken);
   } catch (e) {
@@ -1044,7 +1043,7 @@ export async function loginWithPasskey(beginUrl, finishUrl) {
 
 - [ ] **Step 2: Syntax-check it**
 
-Run: `docker run --rm -v "$PWD:/app" -w /app node:22-alpine node --check assets/passkey.js`
+Run: `node --input-type=module --check < assets/passkey.js`
 Expected: no output, exit 0.
 
 - [ ] **Step 3: Confirm the package ships it**
@@ -1075,6 +1074,8 @@ login-page HTML' rule is intact."
 **Files:**
 - Modify: `README.md`
 - Modify: `CLAUDE.md`
+- Modify: `docs/superpowers/specs/2026-09-13-passkeys-design.md`
+- Modify: `docs/superpowers/plans/2026-09-13-passkeys-library.md`
 
 **Interfaces:**
 - Consumes: everything above.
@@ -1093,20 +1094,23 @@ Add: base64url TEXT rather than `VARBINARY`, and why (SQLite); that origin valid
 Run: `docker run --rm -v "$PWD:/app" -w /app php:8.4-cli php vendor/bin/phpunit`
 Expected: PASS, with every pre-existing `AuthTest` test among them.
 
-- [ ] **Step 4: Commit and tag**
+- [ ] **Step 4: Commit documentation**
 
 ```bash
-git add README.md CLAUDE.md
+git add README.md CLAUDE.md docs/superpowers/specs/2026-09-13-passkeys-design.md docs/superpowers/plans/2026-09-13-passkeys-library.md
 git commit -m "Document passkey support"
-git tag -a v0.4.0 -m "Passkey (WebAuthn) support alongside passwords"
-git push origin main --follow-tags
 ```
 
-- [ ] **Step 5: Apply the migration to production**
+- [ ] **Step 5: Release and apply the migration (release operator)**
 
-Follow the procedure in `CLAUDE.md` step 6 — staged via `vps-infra`'s `sites/single-auth/bin/migrate.sh`. Run `status` first and confirm the new migration is listed as pending, then `up`, then remove the staged copy.
+After review, the release operator tags and pushes the final reviewed commit.
+Apply the production migration only through the procedure owned by
+`vps-infra`; follow `CLAUDE.md` rather than copying operational commands or
+credentials into this public plan. Run its status operation first, confirm the
+new migration is pending, then apply it and confirm nothing remains pending.
 
-Expected after `up`: `Applied: 3, Pending: 0`.
+Do not mark the release or migration as completed until those operations have
+actually succeeded.
 
 **No consumer changes yet.** Composer pins exact commits, so nothing moves onto v0.4.0 until a consumer bumps its constraint. Console integration is a separate plan.
 

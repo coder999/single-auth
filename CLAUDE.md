@@ -67,6 +67,24 @@ This is what lets the whole test suite run against an in-memory SQLite PDO
 instead of needing a live MySQL for every test run. Keep any new code in
 `src/` to this same portable SQL subset.
 
+## Passkey security invariants
+
+WebAuthn credential IDs, user handles, and credential public keys are stored
+as base64url text. In particular, `user_credentials.public_key` contains the
+base64url-encoded COSE public-key bytes, not PEM. Do not change these fields to
+`VARBINARY`: SQLite has no equivalent, and the in-memory SQLite suite depends
+on a text-compatible schema.
+
+`Passkeys::originMatchesRpId()` deliberately requires HTTPS and permits only
+the RP ID itself or its subdomains. There is no development or configuration
+escape hatch, and one must not be added. Plain-HTTP local development uses the
+password path.
+
+`Auth::loginAs()` verifies no credential. It exists only as the shared tail of
+the password and passkey implementations and must never be called from
+application code. Consumers authenticate through `attemptLogin()` or
+`Passkeys::finishLogin()` and then apply their own authorization checks.
+
 ## Consumers
 
 Four apps require this package via a Composer VCS repository entry
