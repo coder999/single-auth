@@ -1,7 +1,7 @@
 /*M!999999\- enable the sandbox mode */
--- MariaDB dump 10.19-11.8.6-MariaDB, for debian-linux-gnu (x86_64)
+-- MariaDB dump 10.19-11.8.8-MariaDB, for Linux (x86_64)
 --
--- Host: 127.0.0.1    Database: single_auth
+-- Host: single-auth-mariadb    Database: single_auth
 -- ------------------------------------------------------
 -- Server version	11.8.8-MariaDB-ubu2404
 
@@ -59,6 +59,29 @@ CREATE TABLE `sessions` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
+-- Table structure for table `user_credentials`
+--
+
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `user_credentials` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` int(10) unsigned NOT NULL,
+  `credential_id` varchar(255) NOT NULL,
+  `public_key` text NOT NULL,
+  `sign_count` int(10) unsigned NOT NULL DEFAULT 0,
+  `transports` varchar(255) DEFAULT NULL,
+  `label` varchar(64) NOT NULL,
+  `created_at` datetime NOT NULL,
+  `last_used_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_credential_id` (`credential_id`),
+  KEY `idx_user` (`user_id`),
+  CONSTRAINT `fk_user_credentials_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
 -- Table structure for table `users`
 --
 
@@ -70,8 +93,10 @@ CREATE TABLE `users` (
   `password_hash` varchar(255) NOT NULL,
   `created_at` datetime NOT NULL DEFAULT current_timestamp(),
   `last_login` datetime DEFAULT NULL,
+  `webauthn_user_handle` varchar(64) DEFAULT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `username` (`username`)
+  UNIQUE KEY `username` (`username`),
+  UNIQUE KEY `uniq_webauthn_user_handle` (`webauthn_user_handle`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -97,5 +122,6 @@ CREATE TABLE `users` (
 LOCK TABLES `schema_migrations` WRITE;
 INSERT INTO `schema_migrations` (version) VALUES
   ('20260812174312'),
-  ('20260813020513');
+  ('20260813020513'),
+  ('20260914115641');
 UNLOCK TABLES;

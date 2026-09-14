@@ -18,8 +18,29 @@ tables, since a mistake affects every consumer at once, not just this repo.
    consuming app's `Auth` usage assumes these shapes. (`users` was renamed
    from `admin_users` in the `2026-08-13-auth-rename` migration — see
    `docs/superpowers/specs/2026-08-13-auth-rename.md`.)
-4. Apply locally to verify:
-   `DATABASE_URL="mysql://root:ChangeThisRootPassword@127.0.0.1:3306/single_auth" dbmate --migrations-dir db/migrations up`
+4. Apply locally to verify. `single-auth-mariadb` publishes nothing to
+   the host (`docker inspect` reports `{"3306/tcp":null}`) — verified
+   2026-09-13 — so run dbmate in a container joined to the `identity`
+   network instead of pointing it at `127.0.0.1:3306`. The container also
+   enforces `--require-secure-transport=ON` with a self-signed local cert
+   (`tls=skip-verify`), and its root password is not a fixed placeholder —
+   read it from the running container at invocation time rather than
+   hardcoding it, since a hardcoded value in this **public** repo would
+   both leak and go stale the moment local dev credentials rotate:
+   ```bash
+   DBPW="$(docker inspect single-auth-mariadb \
+     --format '{{range .Config.Env}}{{println .}}{{end}}' \
+     | sed -n 's/^MYSQL_ROOT_PASSWORD=//p')"
+
+   docker run --rm --network identity -v "$PWD/db:/db" \
+     -e DATABASE_URL="mysql://root:${DBPW}@single-auth-mariadb:3306/single_auth?tls=skip-verify" \
+     ghcr.io/amacneil/dbmate:2.35.0 \
+     --migrations-dir /db/migrations --schema-file /db/schema.sql up
+   ```
+   If the password ever contains `@`, `:`, `/` or `#`, it needs
+   URL-encoding before going into the DSN — an un-encoded special
+   character there is a silent corruption (dbmate parses the DSN wrong),
+   not a clean failure, so it's easy to miss.
 5. Confirm the `db/schema.sql` diff matches intent; stage both files.
 6. Production schema changes happen **only** on the VPS, by hand, via
    `vps-infra`'s `sites/single-auth/bin/migrate.sh` — never by connecting
