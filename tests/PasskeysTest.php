@@ -863,4 +863,150 @@ final class PasskeysTest extends TestCase
         $this->makeCredential(1, 'cred-a', 'Alice Laptop');
         $this->assertTrue($this->passkeys->hasCredentials(1));
     }
+
+    // ------------------------------------------- the gap after check()
+
+    /**
+     * Everything from here down covers the stretch between webauthn-lib's
+     * check() returning and the row landing in the database. That stretch
+     * sits outside finishRegistration()'s try block on purpose -- a database
+     * error there must not be swallowed as "credential rejected" -- which
+     * means anything it can throw escapes as a 500 *after* the user has
+     * already touched their authenticator. The suite runs on SQLite, which
+     * enforces neither column widths nor MariaDB's strict mode, so none of
+     * these could surface as a plain assertion on stored data.
+     */
+
+    public function testPackTransportsSkipsNonStringElements(): void
+    {
+        $this->assertSame('usb', Passkeys::packTransports([123, 'usb']));
+    }
+
+    /**
+     * `transports` is not covered by any signature -- attestation is `none`,
+     * and the denormalizer passes the array through element-unchecked -- so
+     * it is client input arriving at a `: bool` method under strict_types.
+     */
+    #[RunInSeparateProcess]
+    public function testFinishRegistrationRejectsNonStringTransports(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginRegistration(1, 'Laptop');
+        $handle = (string)$this->passkeys->userHandle(1);
+        $authenticator = new SoftwareAuthenticator('example.com', 'a-new-credential', Passkeys::b64uDecode($handle));
+
+        $payload = json_decode($authenticator->attest(self::issuedChallenge()), true);
+        $payload['response']['transports'] = [123];
+
+        $this->assertTrue(
+            $this->passkeys->finishRegistration(1, json_encode($payload)),
+            'a junk transport hint must not abort an otherwise valid ceremony'
+        );
+        $this->assertNull(
+            $this->pdo->query('SELECT transports FROM user_credentials')->fetch()['transports'],
+            'the unusable hint is dropped rather than stored'
+        );
+    }
+
+    /**
+     * CheckCredentialId accepts a raw credential id up to 1023 bytes, but
+     * the column holds 255 base64url characters -- 191 raw bytes. Above
+     * that, MariaDB's strict mode throws a PDOException out of a method
+     * documented to return false, and a relaxed sql_mode is worse: the row
+     * enrols truncated and findCredential() can never match it again.
+     */
+    #[RunInSeparateProcess]
+    public function testFinishRegistrationRejectsAnOversizedCredentialId(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginRegistration(1, 'Laptop');
+        $handle = (string)$this->passkeys->userHandle(1);
+        $authenticator = new SoftwareAuthenticator('example.com', str_repeat('x', 192), Passkeys::b64uDecode($handle));
+
+        $this->assertFalse($this->passkeys->finishRegistration(1, $authenticator->attest(self::issuedChallenge())));
+        $this->assertCount(0, $this->passkeys->listCredentials(1));
+    }
+
+    #[RunInSeparateProcess]
+    public function testFinishRegistrationAcceptsTheWidestCredentialIdTheColumnHolds(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginRegistration(1, 'Laptop');
+        $handle = (string)$this->passkeys->userHandle(1);
+        $authenticator = new SoftwareAuthenticator('example.com', str_repeat('x', 191), Passkeys::b64uDecode($handle));
+
+        $this->assertTrue($this->passkeys->finishRegistration(1, $authenticator->attest(self::issuedChallenge())));
+        $stored = $this->pdo->query('SELECT credential_id FROM user_credentials')->fetch();
+        $this->assertSame(255, strlen($stored['credential_id']), 'exactly fills the column');
+    }
+
+    /**
+     * Re-enrolling an authenticator that returns a stable credential id
+     * violates the UNIQUE index. Unguarded that is a PDOException, again
+     * after a completed biometric.
+     */
+    #[RunInSeparateProcess]
+    public function testFinishRegistrationRejectsAnAlreadyEnrolledCredential(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginRegistration(1, 'Laptop');
+        $handle = (string)$this->passkeys->userHandle(1);
+        $authenticator = new SoftwareAuthenticator('example.com', 'a-new-credential', Passkeys::b64uDecode($handle));
+        $this->assertTrue($this->passkeys->finishRegistration(1, $authenticator->attest(self::issuedChallenge())));
+
+        $this->passkeys->beginRegistration(1, 'Laptop again');
+
+        $this->assertFalse($this->passkeys->finishRegistration(1, $authenticator->attest(self::issuedChallenge())));
+        $this->assertCount(1, $this->passkeys->listCredentials(1), 'the first enrolment survives');
+    }
+
+    /**
+     * The browser half already decodes `excludeCredentials`; until now the
+     * server half never populated it, so nothing told the authenticator not
+     * to re-enrol in the first place.
+     */
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationExcludesAlreadyEnrolledCredentials(): void
+    {
+        $this->makeUser();
+        $this->makeCredential(1, Passkeys::b64u('credential-one'), 'Laptop');
+
+        $options = json_decode($this->passkeys->beginRegistration(1, 'Phone'), true);
+
+        $this->assertSame(
+            [Passkeys::b64u('credential-one')],
+            array_column($options['excludeCredentials'], 'id')
+        );
+    }
+
+    /**
+     * mb_strlen() counts invalid UTF-8 happily; a utf8mb4 column does not
+     * accept it. Without this the length guard's docblock over-claims.
+     */
+    public function testBeginRegistrationRejectsAnInvalidUtf8Label(): void
+    {
+        $this->makeUser();
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->passkeys->beginRegistration(1, "Laptop\xC3\x28");
+    }
+
+    /**
+     * README tells consumers to derive rp_id as ltrim($cookieDomain, '.').
+     * A cookie domain of '.Example.com' would then reject *every* origin,
+     * indistinguishably from a dozen other rejections.
+     */
+    public function testRpIdMatchingIsCaseInsensitive(): void
+    {
+        $passkeys = new Passkeys($this->pdo, new Auth($this->pdo), ['rp_id' => 'Example.COM']);
+
+        $this->assertTrue($passkeys->originMatchesRpId('https://example.com'));
+        $this->assertTrue($passkeys->originMatchesRpId('https://sub.example.com'));
+
+        // Hosts are case-insensitive per the URL spec. Browsers normalise
+        // before we ever see the origin, so this is defence in depth on a
+        // path that otherwise fails closed and silently.
+        $this->assertTrue($this->passkeys->originMatchesRpId('https://EXAMPLE.com'));
+        $this->assertFalse($this->passkeys->originMatchesRpId('https://NOTexample.com'));
+    }
 }

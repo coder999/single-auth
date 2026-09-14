@@ -10,6 +10,7 @@ use DateTimeImmutable;
 use DateTimeZone;
 use InvalidArgumentException;
 use PDO;
+use PDOException;
 use Symfony\Component\Serializer\SerializerInterface;
 use Symfony\Component\Uid\Uuid;
 use Throwable;
@@ -41,10 +42,20 @@ final class Passkeys
      * authenticator, because the alternative is a PDOException thrown out of
      * finishRegistration() *after* a ceremony the user has already completed.
      *
-     * VARCHAR(n) on utf8mb4 counts characters, not bytes, hence mb_strlen().
+     * VARCHAR(n) on utf8mb4 counts characters, so the label is measured
+     * with mb_strlen(). The other two hold base64url, which is ASCII, so
+     * characters and bytes coincide there and strlen() is exact.
+     *
+     * The credential id is the one width we cannot enforce before the
+     * ceremony: it is the authenticator's choice, and webauthn-lib accepts
+     * up to 1023 raw bytes (CheckCredentialId.php:35) where this column
+     * holds 191 once base64url-encoded. It is therefore checked after
+     * check() returns and before the INSERT, which is the earliest moment
+     * the value exists.
      */
     public const MAX_LABEL_LENGTH = 64;
     private const MAX_TRANSPORTS_LENGTH = 255;
+    private const MAX_CREDENTIAL_ID_LENGTH = 255;
 
     /**
      * We ask for attestation `none`, under which the authenticator reports
@@ -74,7 +85,10 @@ final class Passkeys
         }
         $this->pdo = $pdo;
         $this->auth = $auth;
-        $this->rpId = (string)$options['rp_id'];
+        // Hosts are case-insensitive. Consumers derive rp_id from their
+        // cookie domain, so a '.Example.com' there would otherwise make
+        // every ceremony fail, silently and unrecognisably.
+        $this->rpId = strtolower((string)$options['rp_id']);
         $this->rpName = (string)($options['rp_name'] ?? 'single-auth');
         $this->challengeTtl = (int)($options['challenge_ttl'] ?? 120);
     }
@@ -93,7 +107,7 @@ final class Passkeys
         if ($parts === false || ($parts['scheme'] ?? '') !== 'https') {
             return false;
         }
-        $host = $parts['host'] ?? '';
+        $host = strtolower($parts['host'] ?? '');
         if ($host === '') {
             return false;
         }
@@ -109,10 +123,16 @@ final class Passkeys
      */
     public function beginRegistration(int $userId, string $label): string
     {
-        if (mb_strlen($label) > self::MAX_LABEL_LENGTH) {
+        if (mb_strlen($label, 'UTF-8') > self::MAX_LABEL_LENGTH) {
             throw new InvalidArgumentException(
                 'Passkey label may not exceed ' . self::MAX_LABEL_LENGTH . ' characters.'
             );
+        }
+        // mb_strlen() counts invalid UTF-8 without complaint; a utf8mb4
+        // column rejects it. Without this the guard above would still let
+        // an "Incorrect string value" through to the INSERT.
+        if (!mb_check_encoding($label, 'UTF-8')) {
+            throw new InvalidArgumentException('Passkey label must be valid UTF-8.');
         }
 
         $username = $this->username($userId);
@@ -122,7 +142,7 @@ final class Passkeys
         $user = self::userEntity($username, $this->ensureUserHandle($userId));
 
         $challenge = random_bytes(32);
-        $options = $this->creationOptions($user, $challenge);
+        $options = $this->creationOptions($user, $challenge, $this->enrolledDescriptors($userId));
 
         // Stored base64url so the challenge survives session serialisation
         // as text; the library wants the raw bytes back on the way in.
@@ -195,22 +215,66 @@ final class Passkeys
             return false;
         }
 
+        $credentialId = self::b64u($record->publicKeyCredentialId);
+        if (strlen($credentialId) > self::MAX_CREDENTIAL_ID_LENGTH) {
+            // Refusing is the only honest option: storing it would either
+            // throw out of a method documented to return false (MariaDB
+            // strict mode) or, worse, silently truncate, enrolling a
+            // credential findCredential() can never match again.
+            return false;
+        }
+
         $now = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-        $this->pdo->prepare(
-            'INSERT INTO user_credentials
-                (user_id, credential_id, public_key, sign_count, transports, label, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)'
-        )->execute([
-            $userId,
-            self::b64u($record->publicKeyCredentialId),
-            self::b64u($record->credentialPublicKey),
-            $record->counter,
-            self::packTransports($record->transports),
-            $label,
-            $now,
-        ]);
+        try {
+            $this->pdo->prepare(
+                'INSERT INTO user_credentials
+                    (user_id, credential_id, public_key, sign_count, transports, label, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)'
+            )->execute([
+                $userId,
+                $credentialId,
+                self::b64u($record->credentialPublicKey),
+                $record->counter,
+                self::packTransports($record->transports),
+                $label,
+                $now,
+            ]);
+        } catch (PDOException $e) {
+            // Only a uniqueness collision, which means this authenticator is
+            // already enrolled -- excludeCredentials should have stopped the
+            // ceremony, but a client is free to ignore it. Every other
+            // database error still escapes: a broken database must not be
+            // reported to the caller as "credential rejected".
+            if (($e->getCode() !== '23000' && $e->getCode() !== 23000)
+                || !str_contains($e->getMessage(), 'credential_id')) {
+                throw $e;
+            }
+            return false;
+        }
 
         return true;
+    }
+
+    /**
+     * The credentials this user has already enrolled, as the browser needs
+     * them in `excludeCredentials` -- which is what stops an authenticator
+     * offering to enrol itself twice. Ids go out raw; the serializer
+     * base64url-encodes them on the way to JSON.
+     *
+     * @return PublicKeyCredentialDescriptor[]
+     */
+    private function enrolledDescriptors(int $userId): array
+    {
+        $st = $this->pdo->prepare('SELECT credential_id FROM user_credentials WHERE user_id = ? ORDER BY id');
+        $st->execute([$userId]);
+
+        return array_map(
+            static fn (array $row): PublicKeyCredentialDescriptor => PublicKeyCredentialDescriptor::create(
+                PublicKeyCredentialDescriptor::CREDENTIAL_TYPE_PUBLIC_KEY,
+                self::b64uDecode((string)$row['credential_id']),
+            ),
+            $st->fetchAll(PDO::FETCH_ASSOC)
+        );
     }
 
     /**
@@ -574,6 +638,13 @@ final class Passkeys
     {
         $packed = '';
         foreach ($transports as $transport) {
+            // Client input: attestation is `none`, so nothing signs this
+            // array, and the denormalizer passes its elements through
+            // unchecked. Under strict_types a non-string here is a
+            // TypeError escaping a `: bool` method.
+            if (!is_string($transport)) {
+                continue;
+            }
             if (str_contains($transport, ',')) {
                 continue; // would not round-trip out of a comma-joined column
             }
@@ -592,9 +663,13 @@ final class Passkeys
      * them. Both must agree, so there is one builder — and it reads nothing
      * but its arguments, so building options can never write to `users`.
      */
+    /**
+     * @param PublicKeyCredentialDescriptor[] $excludeCredentials
+     */
     private function creationOptions(
         PublicKeyCredentialUserEntity $user,
-        string $rawChallenge
+        string $rawChallenge,
+        array $excludeCredentials = []
     ): PublicKeyCredentialCreationOptions {
         return PublicKeyCredentialCreationOptions::create(
             // rp.name is deprecated since webauthn-lib 5.3.0 and a non-empty
@@ -617,7 +692,7 @@ final class Passkeys
                 AuthenticatorSelectionCriteria::RESIDENT_KEY_REQUIREMENT_REQUIRED,
             ),
             PublicKeyCredentialCreationOptions::ATTESTATION_CONVEYANCE_PREFERENCE_NONE,
-            [],
+            $excludeCredentials,
             $this->challengeTtl * 1000,
         );
     }
