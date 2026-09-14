@@ -803,4 +803,64 @@ final class PasskeysTest extends TestCase
             'without a handle there is nothing for the library to match the assertion against'
         );
     }
+
+    // -- Task 7: credential management -----------------------------------
+    //
+    // listCredentials/deleteCredential/hasCredentials are plain SQL over
+    // rows in user_credentials; none of them run a ceremony or touch a
+    // public key's contents, so enrolCredential()'s real COSE key and
+    // software authenticator are unneeded machinery here. This helper is a
+    // direct INSERT, matching what these methods actually read.
+
+    private function makeCredential(int $userId, string $credId, string $label): int
+    {
+        $this->pdo->prepare('INSERT INTO user_credentials
+            (user_id, credential_id, public_key, sign_count, label, created_at)
+            VALUES (?, ?, ?, 0, ?, ?)')
+            ->execute([$userId, $credId, 'PUBKEY', $label, '2026-09-13 00:00:00']);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function testListCredentialsReturnsOnlyOwnAndNoPublicKey(): void
+    {
+        $this->makeUser(1, 'alice');
+        $this->makeUser(2, 'mallory');
+        $this->makeCredential(1, 'cred-a', 'Alice Laptop');
+        $this->makeCredential(2, 'cred-m', 'Mallory Laptop');
+
+        $rows = $this->passkeys->listCredentials(1);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('Alice Laptop', $rows[0]['label']);
+        $this->assertArrayNotHasKey('public_key', $rows[0]);
+    }
+
+    public function testDeleteCredentialCannotDeleteAnotherUsersCredential(): void
+    {
+        $this->makeUser(1, 'alice');
+        $this->makeUser(2, 'mallory');
+        $victim = $this->makeCredential(1, 'cred-a', 'Alice Laptop');
+
+        $this->assertFalse($this->passkeys->deleteCredential(2, $victim));
+        $this->assertCount(1, $this->passkeys->listCredentials(1),
+            'cross-user deletion is a silent privilege failure if unguarded');
+    }
+
+    public function testDeleteCredentialRemovesOwnCredential(): void
+    {
+        $this->makeUser(1, 'alice');
+        $id = $this->makeCredential(1, 'cred-a', 'Alice Laptop');
+
+        $this->assertTrue($this->passkeys->deleteCredential(1, $id));
+        $this->assertCount(0, $this->passkeys->listCredentials(1));
+    }
+
+    public function testHasCredentials(): void
+    {
+        $this->makeUser(1, 'alice');
+        $this->assertFalse($this->passkeys->hasCredentials(1));
+
+        $this->makeCredential(1, 'cred-a', 'Alice Laptop');
+        $this->assertTrue($this->passkeys->hasCredentials(1));
+    }
 }

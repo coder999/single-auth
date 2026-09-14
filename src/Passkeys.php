@@ -401,6 +401,44 @@ final class Passkeys
         return $row === false ? null : $row;
     }
 
+    /**
+     * A user's enrolled passkeys for display/management, oldest first. The
+     * column list is explicit and must stay that way: public_key is never
+     * returned to a caller.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function listCredentials(int $userId): array
+    {
+        $st = $this->pdo->prepare(
+            'SELECT id, label, created_at, last_used_at
+               FROM user_credentials WHERE user_id = ? ORDER BY created_at'
+        );
+        $st->execute([$userId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Ownership is enforced in the WHERE clause, not by a prior read: that
+     * closes the window a check-then-act pair would leave between "is this
+     * mine" and "delete it", and it means one user can never delete
+     * another user's credential, tested directly by
+     * testDeleteCredentialCannotDeleteAnotherUsersCredential.
+     */
+    public function deleteCredential(int $userId, int $credentialId): bool
+    {
+        $st = $this->pdo->prepare('DELETE FROM user_credentials WHERE id = ? AND user_id = ?');
+        $st->execute([$credentialId, $userId]);
+        return $st->rowCount() > 0;
+    }
+
+    public function hasCredentials(int $userId): bool
+    {
+        $st = $this->pdo->prepare('SELECT COUNT(*) AS n FROM user_credentials WHERE user_id = ?');
+        $st->execute([$userId]);
+        return (int)$st->fetch(PDO::FETCH_ASSOC)['n'] > 0;
+    }
+
     public function userHandle(int $userId): ?string
     {
         $st = $this->pdo->prepare('SELECT webauthn_user_handle FROM users WHERE id = ?');
