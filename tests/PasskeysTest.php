@@ -11,6 +11,10 @@ use PDO;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
+use Webauthn\AttestationStatement\AttestationStatementSupportManager;
+use Webauthn\AuthenticatorAssertionResponse;
+use Webauthn\Denormalizer\WebauthnSerializerFactory;
+use Webauthn\PublicKeyCredential;
 
 final class PasskeysTest extends TestCase
 {
@@ -328,5 +332,354 @@ final class PasskeysTest extends TestCase
 
         $this->assertSame($expected, $packed);
         $this->assertLessThanOrEqual(255, strlen((string)$packed));
+    }
+
+    // ---------------------------------------------------------------- login
+
+    private const TEST_USER_HANDLE = 'a-user-handle-that-is-32-bytes!!';
+
+    /**
+     * Enrols a credential the way a completed registration would, and gives
+     * its owner the user handle a real beginRegistration() would have
+     * written. The key material is junk: nothing in this file can produce a
+     * signature that verifies, and nothing in this file tries to.
+     */
+    private function enrolCredential(string $credentialId, int $userId = 1, int $signCount = 0): void
+    {
+        $this->pdo->prepare('UPDATE users SET webauthn_user_handle = ? WHERE id = ?')
+            ->execute([Passkeys::b64u(self::TEST_USER_HANDLE), $userId]);
+        $this->pdo->prepare(
+            'INSERT INTO user_credentials
+                (user_id, credential_id, public_key, sign_count, transports, label, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)'
+        )->execute([
+            $userId,
+            Passkeys::b64u($credentialId),
+            Passkeys::b64u('not a real COSE key'),
+            $signCount,
+            'internal',
+            'Laptop',
+            '2026-09-14 00:00:00',
+        ]);
+    }
+
+    /**
+     * A structurally valid assertion envelope with junk inside.
+     *
+     * It exists because the checks this file cares about live *after*
+     * finishLogin()'s `instanceof PublicKeyCredential` guard, and a payload
+     * that cannot get past that guard cannot exercise them. `'{}'`, and a
+     * payload carrying only an `id` key, both die inside the serializer —
+     * so a rejection test built on either would be green no matter what
+     * finishLogin() did next. This one deserialises into a real
+     * PublicKeyCredential wrapping a real AuthenticatorAssertionResponse,
+     * which makes the credential lookup, the origin rule and the ceremony
+     * reachable. The signature is not real and never verifies; that is the
+     * point, not a shortcoming.
+     */
+    private static function assertionEnvelope(
+        string $credentialId,
+        string $origin = 'https://example.com',
+        int $signCount = 0
+    ): string {
+        $clientData = json_encode([
+            'type'        => 'webauthn.get',
+            'challenge'   => Passkeys::b64u(random_bytes(32)),
+            'origin'      => $origin,
+            'crossOrigin' => false,
+        ], JSON_THROW_ON_ERROR);
+
+        // 32-byte rpIdHash, then flags (user present | user verified), then
+        // a big-endian 4-byte sign count. No attested credential data and no
+        // extensions, so the structure ends there.
+        $authData = str_repeat("\x00", 32) . chr(0x05) . pack('N', $signCount);
+
+        return json_encode([
+            'id'       => Passkeys::b64u($credentialId),
+            'rawId'    => Passkeys::b64u($credentialId),
+            'type'     => 'public-key',
+            'response' => [
+                'clientDataJSON'    => Passkeys::b64u($clientData),
+                'authenticatorData' => Passkeys::b64u($authData),
+                'signature'         => Passkeys::b64u('not a real signature'),
+                'userHandle'        => Passkeys::b64u(self::TEST_USER_HANDLE),
+            ],
+        ], JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * A guard on the tests below, not on the library. Every rejection in
+     * finishLogin() returns the same null, so if this envelope ever stopped
+     * deserialising, every test that uses it would stay green while testing
+     * only the `instanceof` guard. This fails loudly instead.
+     */
+    public function testTheAssertionEnvelopeGetsPastBothInstanceofGuards(): void
+    {
+        $serializer = (new WebauthnSerializerFactory(AttestationStatementSupportManager::create()))->create();
+
+        $credential = $serializer->deserialize(
+            self::assertionEnvelope('credential-one'),
+            PublicKeyCredential::class,
+            'json'
+        );
+
+        $this->assertInstanceOf(PublicKeyCredential::class, $credential,
+            'the denormalizer returns a bare array for a payload with no top-level id');
+        $this->assertInstanceOf(AuthenticatorAssertionResponse::class, $credential->response);
+        $this->assertSame('https://example.com', $credential->response->clientDataJSON->origin);
+        $this->assertSame(Passkeys::b64u('credential-one'), Passkeys::b64u($credential->rawId));
+    }
+
+    public static function signCounts(): array
+    {
+        return [
+            'both zero: authenticator does not count' => [0, 0, true],
+            'normal increment'                        => [5, 6, true],
+            'large jump forward'                      => [5, 500, true],
+            'replay: same non-zero value'             => [5, 5, false],
+            'clone: counter went backwards'           => [5, 4, false],
+            'first use from zero'                     => [0, 1, true],
+            'suspicious reset to zero'                => [5, 0, false],
+        ];
+    }
+
+    #[DataProvider('signCounts')]
+    public function testSignCountRule(int $stored, int $incoming, bool $expected): void
+    {
+        $this->assertSame($expected, $this->passkeys->signCountAcceptable($stored, $incoming));
+    }
+
+    #[RunInSeparateProcess]
+    public function testBeginLoginStoresLoginChallengeAndAllowsAnyCredential(): void
+    {
+        $json = $this->passkeys->beginLogin();
+        $options = json_decode($json, true);
+
+        $this->assertIsArray($options);
+        $this->assertSame('example.com', $options['rpId']);
+        $this->assertNotEmpty($options['challenge']);
+        $this->assertSame('login', $_SESSION['passkey_purpose']);
+        $this->assertTrue(
+            empty($options['allowCredentials']),
+            'discoverable credentials: the browser picks, so no username is needed'
+        );
+    }
+
+    /**
+     * The mirror of testBeginRegistrationStoresAChallengeTheGateAccepts:
+     * joins the session beginLogin() really writes to the gate that reads
+     * it, so the two cannot drift.
+     */
+    #[RunInSeparateProcess]
+    public function testBeginLoginStoresAChallengeTheGateAccepts(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginLogin();
+
+        $this->assertTrue(Passkeys::challengeIsValid($_SESSION, 'login', null, time()));
+        $this->assertFalse(
+            Passkeys::challengeIsValid($_SESSION, 'login', 1, time()),
+            'a login challenge belongs to nobody until the assertion names its owner'
+        );
+
+        $this->passkeys->finishLogin(self::assertionEnvelope('no-such-credential'));
+
+        $this->assertFalse(
+            Passkeys::challengeIsValid($_SESSION, 'login', null, time()),
+            'the challenge must be single use'
+        );
+    }
+
+    /**
+     * Ruling 2's pair. Each names a cross-purpose redemption, and each is
+     * proved by the gate assertion, not by the ceremony call underneath it:
+     * every rejection inside finishRegistration()/finishLogin() returns the
+     * same false/null, so no black-box call can tell which check fired.
+     */
+    #[RunInSeparateProcess]
+    public function testFinishRegistrationRejectsChallengeIssuedForLogin(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginLogin();
+
+        $this->assertFalse(
+            Passkeys::challengeIsValid($_SESSION, 'register', 1, time()),
+            'a login challenge must not be redeemable as a registration'
+        );
+
+        $this->assertFalse($this->passkeys->finishRegistration(1, '{}'));
+    }
+
+    #[RunInSeparateProcess]
+    public function testFinishLoginRejectsChallengeIssuedForRegistration(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one');
+        $this->passkeys->beginRegistration(1, 'Laptop');
+
+        $this->assertFalse(
+            Passkeys::challengeIsValid($_SESSION, 'login', null, time()),
+            'a registration challenge must not be redeemable as a login'
+        );
+
+        $this->assertNull($this->passkeys->finishLogin(self::assertionEnvelope('credential-one')));
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
+
+    // The next three state the public contract and are worth having for
+    // that, but they do not prove the check each is named after: every
+    // rejection in finishLogin() returns the same null, so from outside,
+    // "the challenge gate stopped it" and "it crashed two steps later" look
+    // identical. Verified by mutation on a scratch copy, 2026-09-14 —
+    // removing the challenge gate, the origin gate or the lookup's own null
+    // guard leaves all three green. The checks themselves are proved by
+    // challengeIsValid(), originMatchesRpId() and findCredential(), which
+    // are tested directly; what these add is the session assertion, which
+    // is the one property that must hold on every path regardless of which
+    // check fired.
+
+    #[RunInSeparateProcess]
+    public function testFinishLoginRejectsWhenNoChallenge(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one');
+        $_SESSION = [];
+
+        $this->assertNull($this->passkeys->finishLogin(self::assertionEnvelope('credential-one')));
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
+
+    #[RunInSeparateProcess]
+    public function testFinishLoginRejectsUnknownCredentialId(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one');
+        $this->passkeys->beginLogin();
+
+        $this->assertNull($this->passkeys->finishLogin(self::assertionEnvelope('no-such-credential')));
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
+
+    #[RunInSeparateProcess]
+    public function testFinishLoginRejectsAnAssertionFromADisallowedOrigin(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one');
+        $this->passkeys->beginLogin();
+
+        $this->assertNull(
+            $this->passkeys->finishLogin(self::assertionEnvelope('credential-one', 'https://evil.test'))
+        );
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
+
+    /**
+     * The most important test in this file.
+     *
+     * A zero sign count on both sides is the common case, not a corner: it
+     * is what iCloud Keychain reports, and the sign-counter rule accepts it
+     * by design. So for a credential like this one, the assertion
+     * validation is the *only* thing between a forged envelope and a
+     * session. Delete the validator call from finishLogin() and this test
+     * fails with `user_id` in the session — confirmed by mutation, on a
+     * scratch copy, 2026-09-14. The 5-then-6 variant below does not have
+     * that property, because the sign-counter rule catches that mutant
+     * first; this one has no second line of defence behind it.
+     */
+    #[RunInSeparateProcess]
+    public function testFinishLoginRejectsAnUnverifiableAssertionForAZeroCounterCredential(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one', 1, 0);
+        $this->passkeys->beginLogin();
+
+        $this->assertNull(
+            $this->passkeys->finishLogin(self::assertionEnvelope('credential-one', 'https://example.com', 0))
+        );
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
+
+    /**
+     * The same rejection with a counter in use. What this one discriminates
+     * is the *ordering* of the write-back: move the sign_count / last_used_at
+     * update ahead of the ceremony and it fails, because a rejected
+     * assertion would have moved the counter.
+     */
+    #[RunInSeparateProcess]
+    public function testARejectedAssertionDoesNotTouchTheStoredCredential(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one', 1, 5);
+        $this->passkeys->beginLogin();
+
+        $this->assertNull(
+            $this->passkeys->finishLogin(self::assertionEnvelope('credential-one', 'https://example.com', 6))
+        );
+
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+        $row = $this->pdo->query('SELECT sign_count, last_used_at FROM user_credentials')->fetch();
+        $this->assertSame(5, (int)$row['sign_count'], 'a rejected assertion must not move the counter');
+        $this->assertNull($row['last_used_at'], 'nor mark the credential as used');
+    }
+
+    #[RunInSeparateProcess]
+    public function testFailedLoginEstablishesNoSession(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginLogin();
+
+        $this->passkeys->finishLogin('{}');
+
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
+
+    // The credential lookup, tested directly. Through finishLogin() it
+    // cannot be: an unknown id and a crash on a missing row both come back
+    // as the same null, so removing the lookup's own guard would not fail
+    // any black-box test.
+
+    public function testCredentialLookupReturnsNullForAnUnknownId(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one');
+
+        $this->assertNull($this->passkeys->findCredential(Passkeys::b64u('no-such-credential')));
+    }
+
+    public function testCredentialLookupFindsAnEnrolledCredential(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one', 1, 7);
+
+        $row = $this->passkeys->findCredential(Passkeys::b64u('credential-one'));
+
+        $this->assertIsArray($row);
+        $this->assertSame(1, (int)$row['user_id']);
+        $this->assertSame(7, (int)$row['sign_count']);
+        $this->assertSame(Passkeys::b64u(self::TEST_USER_HANDLE), $row['webauthn_user_handle']);
+    }
+
+    public function testCredentialLookupIgnoresACredentialWhoseOwnerIsGone(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one');
+        // Production has ON DELETE CASCADE, so this row cannot outlive its
+        // user there. The join is what makes that true here as well, and an
+        // ownerless credential must never authenticate anyone.
+        $this->pdo->exec('DELETE FROM users WHERE id = 1');
+
+        $this->assertNull($this->passkeys->findCredential(Passkeys::b64u('credential-one')));
+    }
+
+    public function testCredentialLookupIgnoresACredentialWhoseOwnerHasNoUserHandle(): void
+    {
+        $this->makeUser();
+        $this->enrolCredential('credential-one');
+        $this->pdo->exec('UPDATE users SET webauthn_user_handle = NULL WHERE id = 1');
+
+        $this->assertNull(
+            $this->passkeys->findCredential(Passkeys::b64u('credential-one')),
+            'without a handle there is nothing for the library to match the assertion against'
+        );
     }
 }

@@ -11,18 +11,26 @@ use DateTimeZone;
 use InvalidArgumentException;
 use PDO;
 use Symfony\Component\Serializer\SerializerInterface;
+use Symfony\Component\Uid\Uuid;
 use Throwable;
+use Webauthn\AttestationStatement\AttestationStatement;
 use Webauthn\AttestationStatement\AttestationStatementSupportManager;
+use Webauthn\AuthenticatorAssertionResponse;
+use Webauthn\AuthenticatorAssertionResponseValidator;
 use Webauthn\AuthenticatorAttestationResponse;
 use Webauthn\AuthenticatorAttestationResponseValidator;
 use Webauthn\AuthenticatorSelectionCriteria;
 use Webauthn\CeremonyStep\CeremonyStepManagerFactory;
+use Webauthn\CredentialRecord;
 use Webauthn\Denormalizer\WebauthnSerializerFactory;
 use Webauthn\PublicKeyCredential;
 use Webauthn\PublicKeyCredentialCreationOptions;
+use Webauthn\PublicKeyCredentialDescriptor;
 use Webauthn\PublicKeyCredentialParameters;
+use Webauthn\PublicKeyCredentialRequestOptions;
 use Webauthn\PublicKeyCredentialRpEntity;
 use Webauthn\PublicKeyCredentialUserEntity;
+use Webauthn\TrustPath\EmptyTrustPath;
 
 final class Passkeys
 {
@@ -37,6 +45,14 @@ final class Passkeys
      */
     public const MAX_LABEL_LENGTH = 64;
     private const MAX_TRANSPORTS_LENGTH = 255;
+
+    /**
+     * We ask for attestation `none`, under which the authenticator reports
+     * an all-zero AAGUID, so there is nothing per-device to store and the
+     * schema has no column for one. The library still wants a Uuid on a
+     * rehydrated record; this is the value that carries no information.
+     */
+    private const ZERO_AAGUID = '00000000-0000-0000-0000-000000000000';
 
     private PDO $pdo;
     private Auth $auth;
@@ -195,6 +211,194 @@ final class Passkeys
         ]);
 
         return true;
+    }
+
+    /**
+     * Returns the credential request options as JSON, for the browser to
+     * hand to navigator.credentials.get().
+     *
+     * No username is asked for and `allowCredentials` is left empty: these
+     * are discoverable credentials, so the authenticator offers the user
+     * whichever passkeys it holds for this RP and the assertion says who
+     * they belong to. Nothing here knows an account, which is why the
+     * challenge is stored with no user id against it.
+     */
+    public function beginLogin(): string
+    {
+        $challenge = random_bytes(32);
+        $options = $this->requestOptions($challenge);
+
+        $this->storeChallenge(self::b64u($challenge), 'login');
+
+        return $this->serializer()->serialize($options, 'json');
+    }
+
+    /**
+     * Validates an assertion and, if every check holds, logs in the account
+     * that owns the credential. Returns that user's row, or null on any
+     * rejection. The challenge is consumed either way.
+     *
+     * This is the only method in the library that both discovers a user and
+     * establishes a session, so the ordering below is the security property
+     * and not a matter of taste: `loginAs()` is the last thing that runs,
+     * and every check above it returns before reaching it. **No null return
+     * may leave a session behind** — that would be an authentication bypass
+     * nobody would ever see.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function finishLogin(string $clientJson): ?array
+    {
+        // Null user id: a login challenge belongs to nobody. The gate
+        // enforces that too, so a challenge issued for a named account's
+        // registration cannot be redeemed here.
+        $challenge = $this->consumeChallenge('login');
+        // storeChallenge() writes this as null for a login; it is only
+        // meaningful to a registration. Cleared so the key does not linger.
+        unset($_SESSION['passkey_label']);
+        if ($challenge === null) {
+            return null;
+        }
+
+        try {
+            $credential = $this->serializer()->deserialize($clientJson, PublicKeyCredential::class, 'json');
+            // The denormalizer returns a bare array, not an object, when the
+            // payload has no top-level "id" key -- it does not throw.
+            if (!$credential instanceof PublicKeyCredential) {
+                return null;
+            }
+            $response = $credential->response;
+            if (!$response instanceof AuthenticatorAssertionResponse) {
+                return null;
+            }
+            $origin = $response->clientDataJSON->origin;
+        } catch (Throwable) {
+            // A malformed payload throws out of deserialize(). Nothing in
+            // this block touches the database, so no database error can be
+            // hidden by it.
+            return null;
+        }
+
+        // Our own rule is the gate, exactly as in finishRegistration(), and
+        // only an origin it has already accepted is handed to the library
+        // as its allowed origin. One statement of the rule, no second copy.
+        if (!$this->originMatchesRpId($origin)) {
+            return null;
+        }
+
+        // Read outside a try, so a database failure surfaces as an
+        // exception rather than being swallowed as "login refused".
+        $row = $this->findCredential(self::b64u($credential->rawId));
+        if ($row === null) {
+            return null;
+        }
+        $storedCount = (int)$row['sign_count'];
+
+        try {
+            $record = self::credentialRecord($row);
+            AuthenticatorAssertionResponseValidator::create(
+                $this->ceremonyFactory($origin)->requestCeremony()
+            )->check(
+                $record,
+                $response,
+                // The same options beginLogin() issued, carrying the same
+                // challenge: that is how the library checks it.
+                $this->requestOptions(self::b64uDecode($challenge)),
+                (string)parse_url($origin, PHP_URL_HOST),
+                // null, because nobody was identified before the ceremony.
+                // The library then *requires* the assertion to carry a user
+                // handle and to match the stored one, which is what ties
+                // this credential to this account.
+                null,
+            );
+        } catch (Throwable) {
+            return null;
+        }
+
+        // check() has already overwritten $record->counter with the count the
+        // authenticator just reported; $storedCount is what the row held
+        // before it.
+        //
+        // The library's CheckCounter applies the same rule inside the
+        // ceremony, so as the code stands this gate rejects nothing the
+        // ceremony let through. It is not decoration, though: restating the
+        // rule keeps it in this library's own directly-testable code, it
+        // survives the ceremony's counter checker being reconfigured, and —
+        // verified by mutation on a scratch copy, 2026-09-14 — it is what
+        // still refuses a forged assertion against a credential with a
+        // non-zero counter if the check() call above is ever lost. A
+        // credential whose counter is zero has nothing behind it but that
+        // call, which is what the sharpest test in the suite covers.
+        if (!$this->signCountAcceptable($storedCount, $record->counter)) {
+            return null;
+        }
+
+        $now = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:s');
+        $this->pdo->prepare('UPDATE user_credentials SET sign_count = ?, last_used_at = ? WHERE id = ?')
+            ->execute([$record->counter, $now, (int)$row['id']]);
+
+        if (!$this->auth->loginAs((int)$row['user_id'])) {
+            return null;    // loginAs() returns before it touches the session
+        }
+        $user = $this->auth->currentUser();
+        if ($user === null) {
+            // Unreachable short of the account being deleted between those
+            // two statements. Undone anyway, because the contract is that a
+            // null return means nobody was logged in, and the one thing
+            // this method must never do is return null from a session.
+            unset($_SESSION['user_id']);
+            return null;
+        }
+        return $user;
+    }
+
+    /**
+     * Many authenticators (notably iCloud Keychain) always report 0. A
+     * pair of zeroes therefore means "this authenticator does not count"
+     * and is accepted. Once a counter is in use, it must strictly
+     * increase: equal means a replayed assertion, lower means a possible
+     * cloned credential.
+     */
+    public function signCountAcceptable(int $stored, int $incoming): bool
+    {
+        if ($stored === 0 && $incoming === 0) {
+            return true;
+        }
+        return $incoming > $stored;
+    }
+
+    /**
+     * The stored credential an assertion names, or null if there is none
+     * this library could authenticate with.
+     *
+     * The join does real work. A credential is only usable if its owner
+     * still exists and still has a WebAuthn user handle, because that
+     * handle is what the library matches the assertion's own handle
+     * against. Production has `ON DELETE CASCADE` on `user_id`, so an
+     * ownerless row cannot exist there — the join makes that true here
+     * rather than depending on it.
+     *
+     * @internal Public only so it can be tested, for the same reason as
+     *   challengeIsValid(): every rejection in finishLogin() returns the
+     *   same null, so from outside, "no such credential" and "crashed on a
+     *   missing row" are indistinguishable, and a black-box test cannot
+     *   tell a working lookup from a missing one. It returns nothing
+     *   secret — a public key, a counter, and two ids.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findCredential(string $credentialId): ?array
+    {
+        $st = $this->pdo->prepare(
+            'SELECT c.id, c.user_id, c.credential_id, c.public_key, c.sign_count, c.transports,
+                    u.webauthn_user_handle
+               FROM user_credentials c
+               JOIN users u ON u.id = c.user_id
+              WHERE c.credential_id = ? AND u.webauthn_user_handle IS NOT NULL'
+        );
+        $st->execute([$credentialId]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        return $row === false ? null : $row;
     }
 
     public function userHandle(int $userId): ?string
@@ -380,7 +584,69 @@ final class Passkeys
         );
     }
 
-    /** $origin must already have passed originMatchesRpId(). */
+    /**
+     * The options the browser is given at begin time, and the same options
+     * rebuilt at finish time so the library can check the assertion against
+     * them. One builder, for the same reason creationOptions() is one.
+     */
+    private function requestOptions(string $rawChallenge): PublicKeyCredentialRequestOptions
+    {
+        return PublicKeyCredentialRequestOptions::create(
+            $rawChallenge,
+            $this->rpId,
+            // Empty on purpose: discoverable credentials. A non-empty list
+            // would mean knowing the account before the ceremony, which is
+            // the thing passkeys exist to avoid.
+            [],
+            PublicKeyCredentialRequestOptions::USER_VERIFICATION_REQUIREMENT_REQUIRED,
+            $this->challengeTtl * 1000,
+        );
+    }
+
+    /**
+     * Rebuilds a stored credential as the library's own value object. This
+     * schema keeps the fixed passkey columns rather than a serialised
+     * record, so the conversion is here: everything in the database is
+     * base64url text, everything the library takes is raw bytes.
+     *
+     * backupEligible / backupStatus / uvInitialized are left null
+     * deliberately — there are no columns for them, so there is nothing to
+     * rehydrate. check() sets them on the returned object and we discard
+     * them.
+     *
+     * @param array<string,mixed> $row as returned by findCredential()
+     */
+    private static function credentialRecord(array $row): CredentialRecord
+    {
+        $transports = $row['transports'] === null || $row['transports'] === ''
+            ? []
+            : explode(',', (string)$row['transports']);
+
+        return CredentialRecord::create(
+            self::b64uDecode((string)$row['credential_id']),
+            PublicKeyCredentialDescriptor::CREDENTIAL_TYPE_PUBLIC_KEY,
+            $transports,
+            AttestationStatement::TYPE_NONE,
+            EmptyTrustPath::create(),
+            Uuid::fromString(self::ZERO_AAGUID),
+            self::b64uDecode((string)$row['public_key']),
+            self::b64uDecode((string)$row['webauthn_user_handle']),
+            (int)$row['sign_count'],
+        );
+    }
+
+    /**
+     * $origin must already have passed originMatchesRpId().
+     *
+     * No TopOriginValidator is registered, in either ceremony. CheckTopOrigin
+     * therefore rejects any response whose clientDataJSON carries a
+     * topOrigin — that is, any ceremony run from inside a cross-origin
+     * iframe. That is the posture we want for an identity provider: a
+     * passkey may only be created or used from a top-level page on our own
+     * origin, never from a frame a third-party site controls. Opting in
+     * would mean calling enableTopOriginValidator() and deciding which
+     * embedders to trust; we trust none.
+     */
     private function ceremonyFactory(string $origin): CeremonyStepManagerFactory
     {
         $factory = new CeremonyStepManagerFactory();
