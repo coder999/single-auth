@@ -213,4 +213,44 @@ final class AuthTest extends TestCase
         $st = $this->pdo->query('SELECT last_login FROM users WHERE id = 8');
         $this->assertNotNull($st->fetch(PDO::FETCH_ASSOC)['last_login']);
     }
+
+    /**
+     * attemptLogin() delegates the whole "establish a session" step to
+     * loginAs(), which returns false when the user row is gone. Reporting
+     * success anyway hands the caller a logged-in user that has no session.
+     *
+     * The race is real but narrow -- the row must vanish between
+     * attemptLogin()'s SELECT and loginAs()'s -- so it is reproduced here
+     * by deleting through a second handle to the same database at exactly
+     * that point, rather than by stubbing Auth.
+     */
+    #[RunInSeparateProcess]
+    public function testAttemptLoginReportsFailureWhenTheUserVanishesMidLogin(): void
+    {
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (9, ?, ?)')
+            ->execute(['eve', password_hash('pw', PASSWORD_DEFAULT)]);
+
+        $pdo = new class ('sqlite::memory:') extends PDO {
+            public ?PDO $real = null;
+            public function prepare(string $query, array $options = []): \PDOStatement|false
+            {
+                // The DELETE lands after the credential check has passed and
+                // before loginAs() looks the user up again.
+                if (str_starts_with($query, 'DELETE FROM login_attempts')) {
+                    $this->real->exec('DELETE FROM users WHERE id = 9');
+                }
+                return $this->real->prepare($query, $options);
+            }
+            public function query(string $query, ?int $fetchMode = null, mixed ...$args): \PDOStatement|false
+            {
+                return $this->real->query($query);
+            }
+        };
+        $pdo->real = $this->pdo;
+
+        $auth = new Auth($pdo, ['cookie_domain' => '.nexus.local']);
+
+        $this->assertFalse($auth->attemptLogin('eve', 'pw'));
+        $this->assertArrayNotHasKey('user_id', $_SESSION);
+    }
 }

@@ -119,8 +119,12 @@ final class Auth
 
         if ($user !== false && password_verify($password, $user['password_hash'])) {
             $this->pdo->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$this->clientIp()]);
-            $this->loginAs((int)$user['id']);
-            return true;
+            // loginAs() owns the whole "establish a session" step, including
+            // deciding the user still exists. Reporting success when it
+            // declined would hand the caller a logged-in user with no
+            // session. Not counted as a failed attempt: the credential was
+            // correct, so rate-limiting this address would be wrong.
+            return $this->loginAs((int)$user['id']);
         }
 
         $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
