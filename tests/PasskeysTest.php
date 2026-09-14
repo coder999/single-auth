@@ -98,4 +98,84 @@ final class PasskeysTest extends TestCase
     {
         $this->assertFalse($this->passkeys->originMatchesRpId($origin));
     }
+
+    private function makeUser(int $id = 1, string $name = 'alice'): void
+    {
+        $this->pdo->prepare('INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)')
+            ->execute([$id, $name, password_hash('pw', PASSWORD_DEFAULT)]);
+    }
+
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationGeneratesUserHandleWhenAbsent(): void
+    {
+        $this->makeUser();
+        $this->assertNull($this->passkeys->userHandle(1));
+
+        $this->passkeys->beginRegistration(1, 'Laptop');
+
+        $handle = $this->passkeys->userHandle(1);
+        $this->assertNotNull($handle);
+        $this->assertNotSame('1', $handle, 'handle must not be the user id');
+        $this->assertGreaterThanOrEqual(32, strlen($handle));
+    }
+
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationReusesExistingUserHandle(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginRegistration(1, 'Laptop');
+        $first = $this->passkeys->userHandle(1);
+
+        $this->passkeys->beginRegistration(1, 'Phone');
+
+        $this->assertSame($first, $this->passkeys->userHandle(1),
+            'regenerating the handle would orphan enrolled credentials');
+    }
+
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationReturnsJsonWithRpIdAndChallenge(): void
+    {
+        $this->makeUser();
+
+        $json = $this->passkeys->beginRegistration(1, 'Laptop');
+        $options = json_decode($json, true);
+
+        $this->assertIsArray($options);
+        $this->assertSame('example.com', $options['rp']['id']);
+        $this->assertNotEmpty($options['challenge']);
+    }
+
+    #[RunInSeparateProcess]
+    public function testBeginRegistrationStoresSingleUseChallengeInSession(): void
+    {
+        $this->makeUser();
+
+        $this->passkeys->beginRegistration(1, 'Laptop');
+
+        $this->assertNotEmpty($_SESSION['passkey_challenge']);
+        $this->assertSame('register', $_SESSION['passkey_purpose']);
+        $this->assertSame('Laptop', $_SESSION['passkey_label']);
+        $this->assertGreaterThan(time(), $_SESSION['passkey_expires']);
+    }
+
+    #[RunInSeparateProcess]
+    public function testFinishRegistrationRejectsWhenNoChallengeInSession(): void
+    {
+        $this->makeUser();
+        $_SESSION = [];
+
+        $this->assertFalse($this->passkeys->finishRegistration(1, '{}'));
+    }
+
+    #[RunInSeparateProcess]
+    public function testFinishRegistrationRejectsExpiredChallenge(): void
+    {
+        $this->makeUser();
+        $this->passkeys->beginRegistration(1, 'Laptop');
+        $_SESSION['passkey_expires'] = time() - 1;
+
+        $this->assertFalse($this->passkeys->finishRegistration(1, '{}'));
+        $this->assertArrayNotHasKey('passkey_challenge', $_SESSION,
+            'a consumed or expired challenge must be cleared, not left to retry');
+    }
 }
