@@ -5,9 +5,9 @@ subdomain apps. One login, one session, shared across every consuming
 app via a cookie scoped to your chosen domain and a dedicated identity
 database.
 
-See `docs/superpowers/specs/2026-08-12-single-auth-design.md` for the full
-design, and `docs/superpowers/plans/` for how this and its two consuming
-projects were built.
+Start with the [new-site onboarding guide](docs/onboarding.md).
+The [original design](docs/superpowers/specs/2026-08-12-single-auth-design.md)
+and implementation plans are historical context, not deployment checklists.
 
 ## What this is
 
@@ -24,7 +24,8 @@ see the design doc's "Authn vs authz" section for why.
 ## Using this in a consuming app
 
 ```php
-$pdo = new PDO($identityDsn, $identityUser, $identityPass, [...]);
+// Configure TLS and PDO error handling as shown in the onboarding guide.
+$pdo = new PDO($identityDsn, $identityUser, $identityPass, $identityPdoOptions);
 $auth = new \Coder999\SingleAuth\Auth($pdo, [
     'cookie_domain' => $isLocal ? '.yourdomain.local' : '.yourdomain.com',
     'cookie_secure' => !$isLocal,
@@ -35,7 +36,8 @@ session_set_save_handler(new \Coder999\SingleAuth\DbSessionHandler($pdo), true);
 $user = $auth->requireLogin(); // redirects to login.php if not logged in
 ```
 
-On the login form, `attemptLogin()` does **not** consult `loginThrottled()`
+Protect the password form with `csrfField()` and call `csrfCheck()` before
+attempting authentication. On the login form, `attemptLogin()` does **not** consult `loginThrottled()`
 itself — enforcing the lockout is the calling app's responsibility. Check
 throttling before attempting the login:
 
@@ -129,62 +131,17 @@ into `$_POST['csrf']` before calling `csrfCheck()`.
 The endpoint contract expected by `assets/passkey.js` is simple: each begin
 action responds with the raw options JSON returned by `Passkeys`; each finish
 action responds with `{"ok":true}` or `{"ok":false,"error":"..."}`.
-Here is the core of a registration endpoint:
+Use the [endpoint integration pattern](docs/onboarding.md#4-wire-passkey-endpoints)
+for authentication, authorization, CSRF, throttling, and JSON validation.
+Keep the original JSON string for `finishRegistration()` and `finishLogin()`;
+do not decode and then re-encode untrusted input. Valid JSON such as `1e400`
+can decode to a non-finite PHP float that throws during re-encoding.
 
-```php
-header('Content-Type: application/json');
-
-function requireJsonCsrf(Auth $auth): void
-{
-    $sent = (string)($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
-    if ($sent === '' || !hash_equals($auth->csrfToken(), $sent)) {
-        http_response_code(400);
-        echo json_encode(['ok' => false, 'error' => 'Invalid or expired form token.']);
-        exit;
-    }
-}
-
-$user = $auth->requireLogin();
-requireJsonCsrf($auth);
-
-// Decode after the CSRF check, and catch: JSON_THROW_ON_ERROR on unchecked
-// input is an uncaught JsonException, i.e. a 500 on malformed input.
-try {
-    $body = json_decode(file_get_contents('php://input'), true, 512, JSON_THROW_ON_ERROR);
-} catch (JsonException) {
-    http_response_code(400);
-    echo json_encode(['ok' => false, 'error' => 'Malformed request.']);
-    exit;
-}
-$action = (string)($_GET['action'] ?? '');
-
-if ($action === 'register-begin') {
-    echo $passkeys->beginRegistration((int)$user['id'], (string)($body['label'] ?? ''));
-} elseif ($action === 'register-finish') {
-    $ok = $passkeys->finishRegistration((int)$user['id'], json_encode($body, JSON_THROW_ON_ERROR));
-    echo json_encode(['ok' => $ok] + ($ok ? [] : ['error' => 'Passkey registration failed.']));
-}
-```
-
-Login endpoints use the same wire contract. A successful `finishLogin()` has
-already established the shared session. If a consumer applies an allowlist,
-role, or any other authorization check after `attemptLogin()`, it **must apply
-the same check to the user returned by `finishLogin()`**. Otherwise passkey
-login bypasses that authorization. Clear the newly established session when
-authorization denies the user:
-
-```php
-if ($action === 'login-begin') {
-    echo $passkeys->beginLogin();
-} elseif ($action === 'login-finish') {
-    $user = $passkeys->finishLogin(json_encode($body, JSON_THROW_ON_ERROR));
-    $ok = $user !== null && consumerUserAllowed($user);
-    if ($user !== null && !$ok) {
-        $auth->logout();
-    }
-    echo json_encode(['ok' => $ok] + ($ok ? [] : ['error' => 'Passkey login failed.']));
-}
-```
+A successful `finishLogin()` has already established the shared session.
+Apply the same app authorization check used after password authentication,
+and call `logout()` if access is denied. Login actions must be reachable
+without an existing authenticated session; registration and deletion must
+require an authorized session and a valid CSRF token.
 
 Serve the browser helper through a public PHP endpoint because consumers
 cannot expose files below `vendor/` directly:
@@ -218,5 +175,6 @@ consumer whose deployed code still queries the old names breaks the
 moment it lands. See `docs/superpowers/specs/2026-08-13-auth-rename.md`
 for the coordinated cutover this was originally part of. This is now only
 a concern when bootstrapping a fresh database (local dev, or a rebuilt
-production instance); both migrations have been applied in production
-since the 2026-08-13 cutover, confirmed 2026-09-13.
+production instance); the rename was applied during the original cutover. Do not infer current
+schema readiness from that historical event: inspect migration status,
+including the later passkey migration, before enabling a new consumer.

@@ -106,12 +106,9 @@ single shared `identity_auth` user for this — that is **not** what was
 built. Production gives each consumer its own user, which is the better
 arrangement; the doc is stale on this point. Confirmed 2026-09-13.
 
-This repo is **public**, so the actual usernames and grants are
-deliberately not written down here — see `vps-infra` (private) for the
-identity database's real user inventory, and note that
-`single-auth-mariadb` publishes 3306 for a remote consumer, which is why
-enumerating valid usernames in public would be doing an attacker's
-reconnaissance for them.
+This repo is **public**. Keep production usernames, grants, credentials,
+and network topology in `vps-infra` (private). Inspect its current site
+configuration rather than assuming the identity database publishes a port.
 
 At least one non-Composer consumer also reaches `single-auth-mariadb`
 directly via a `vps-infra` nginx/PHP gate rather than through this
@@ -120,19 +117,10 @@ database; this file is only authoritative for who uses this package.
 
 See the design doc for the full authn/authz split rationale.
 
-## Preferred passkey experience for public-facing consumers
+## Onboarding and preferred passkey experience
 
-User preference, recorded 2026-09-14: offer passkey enrollment as part of
-sign-in for public-facing sites. After a successful password sign-in, if
-that account has no registered passkeys, offer **Create a passkey for
-faster sign-in**, with **Create passkey**, **Not now**, and **Don’t ask again** actions.
-**Not now** dismisses the current offer; **Don’t ask again** saves an
-account-level preference suppressing future enrollment prompts. Users can
-still create passkeys from the management page. Enrollment is optional and attaches to the authenticated account; it must never let
-an anonymous visitor create a credential for an existing account.
-
-Keep password sign-in available and retain a separate passkey management
-page for adding or deleting credentials later. This is the preferred flow
-for future public-facing consumer work, not a claim that every consumer
-already implements it. A single-user admin site may use management-page
-only enrollment.
+Use [docs/onboarding.md](docs/onboarding.md) for new consumer sites. It is
+the canonical onboarding checklist and records the user's public-site
+passkey enrollment preference, including **Don't ask again**. Update that
+guide when integration contracts change; historical plans are not the
+source of truth for new integrations.
