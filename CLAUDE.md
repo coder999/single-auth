@@ -119,3 +119,18 @@ library. `vps-infra/sites/` is authoritative for who talks to that
 database; this file is only authoritative for who uses this package.
 
 See the design doc for the full authn/authz split rationale.
+
+## Preferred passkey experience for public-facing consumers
+
+User preference, recorded 2026-09-14: offer passkey enrollment as part of
+sign-in for public-facing sites. After a successful password sign-in, if
+that account has no registered passkeys, offer **Create a passkey for
+faster sign-in**, with **Create passkey** and **Not now** actions. Enrollment
+is optional and attaches to the authenticated account; it must never let
+an anonymous visitor create a credential for an existing account.
+
+Keep password sign-in available and retain a separate passkey management
+page for adding or deleting credentials later. This is the preferred flow
+for future public-facing consumer work, not a claim that every consumer
+already implements it. A single-user admin site may use management-page
+only enrollment.
