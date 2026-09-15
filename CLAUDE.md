@@ -125,8 +125,10 @@ See the design doc for the full authn/authz split rationale.
 User preference, recorded 2026-09-14: offer passkey enrollment as part of
 sign-in for public-facing sites. After a successful password sign-in, if
 that account has no registered passkeys, offer **Create a passkey for
-faster sign-in**, with **Create passkey** and **Not now** actions. Enrollment
-is optional and attaches to the authenticated account; it must never let
+faster sign-in**, with **Create passkey**, **Not now**, and **Don’t ask again** actions.
+**Not now** dismisses the current offer; **Don’t ask again** saves an
+account-level preference suppressing future enrollment prompts. Users can
+still create passkeys from the management page. Enrollment is optional and attaches to the authenticated account; it must never let
 an anonymous visitor create a credential for an existing account.
 
 Keep password sign-in available and retain a separate passkey management
