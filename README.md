@@ -8,6 +8,9 @@ database.
 Start with the [new-site onboarding guide](docs/onboarding.md).
 The [original design](docs/superpowers/specs/2026-08-12-single-auth-design.md)
 and implementation plans are historical context, not deployment checklists.
+[Future directions](docs/future-directions.md) records the open
+library-vs-OIDC question, and why it is deliberately tabled — read it before
+proposing an architecture change.
 
 ## What this is
 
